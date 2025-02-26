@@ -21,7 +21,7 @@ echo "4. Click 'Generate key'."
 echo "5. IMMEDIATELY copy the *FULL* key (INCLUDING the 'tskey-auth-' prefix)."
 echo "   The key will only be displayed ONCE.  Treat it like a password."
 echo "----------------------------------------------------------------------------------------"
-read -r -p "Press Enter when you have generated and copied the key..." </dev/tty # CORRECTED LINE
+read -r -p "Press Enter when you have generated and copied the key..." </dev/tty
 
 # --- Configuration (Prompt for user input) ---
 
@@ -92,18 +92,15 @@ if [ $? -ne 0 ]; then
 fi
 rm tailscale.tgz
 
-# --- SSH Key Generation ---
-echo "Generating SSH key pair..."
-ssh-keygen -t ed25519 -f /userdata/system/tailscale/id_ed25519 -N ""
-if [ $? -ne 0 ]; then
-  echo "ERROR: Failed to generate SSH key pair."
-  exit 1
-fi
+# --- SSH Key Setup (Modified) ---
+echo "Setting up SSH key-based authentication..."
 
-# Add the public key to authorized_keys
-cat /userdata/system/tailscale/id_ed25519.pub >> /root/.ssh/authorized_keys
+# Add the *provided* public key to authorized_keys.
+echo "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINPlPUBLrsea+vOb4E5aGwiBKDYAnoytPJHhZio76jeQ batocera-tailscale" >> /root/.ssh/authorized_keys
+
 chmod 700 /root/.ssh
 chmod 600 /root/.ssh/authorized_keys
+# --- End of SSH Key Setup ---
 
 
 # Create the startup script
@@ -209,40 +206,31 @@ then
     exit 1
 fi
 
-# --- Instructions for Downloading Private Key ---
+# --- Instructions for Using the Private Key---
 echo "------------------------------------------------------------------------"
 echo "All checks passed. Tailscale appears to be installed and running correctly."
 echo "It is now safe to save the overlay and reboot."
 echo ""
-echo "IMPORTANT: You will need to download the private SSH key to connect via SSH"
-echo "           after rebooting.  Run the following command on your WINDOWS PC"
-echo "           (in a NEW PowerShell window):"
+echo "IMPORTANT: You have already generated an SSH key pair on your Windows PC."
+echo "          You will use the PRIVATE key from that pair to connect via SSH."
 echo ""
-
-# Get Tailscale IP.  Use a more robust method that handles potential errors.
+echo "To connect via SSH from your Windows PC, use the following command:"
+echo ""
 TAILSCALE_IP=$ (/userdata/system/tailscale/tailscale status | grep -oP '^\s*\d+\.\d+\.\d+\.\d+' | head -n 1)
-
 if [[ -z "$TAILSCALE_IP" ]]; then
   echo "ERROR: Could not determine Tailscale IP address.  Manual key download required."
 else
-  echo "  scp root@${TAILSCALE_IP}:/userdata/system/tailscale/id_ed25519 C:\\Users\\<your_username>\\.ssh"
-  echo ""
-  echo "Replace '<your_username>' with your actual Windows username."
+  echo "  ssh -i C:\\Users\\<your_username>\\.ssh\\id_ed25519 root@${TAILSCALE_IP}"
 fi
+echo ""
+echo "Replace '<your_username>' with your actual Windows username."
 
-echo "You will be prompted for the Batocera Pi's root password (default: linux) to download the key."
-echo ""
-echo "After downloading the key, you can SSH into the Pi using:"
-echo "  ssh -i C:\\Users\\<your_username>\\.ssh\\id_ed25519 root@${TAILSCALE_IP}"
-echo ""
-echo "If you are unable to download the key now, you can do it later, but you MUST"
-echo "download it BEFORE rebooting.  Without the key, you will not be able to SSH in."
 echo "------------------------------------------------------------------------"
 
-read -r -p "Have you downloaded the private key, or do you understand how to do so (yes/no)? " DOWNLOADED
+read -r -p "Have understood the above instructions (yes/no)? " KEY_READY
 
-if [[ "$DOWNLOADED" != "yes" ]]; then
-  echo "ERROR: You MUST download the private key before rebooting."
+if [[ "$KEY_READY" != "yes" ]]; then
+  echo "ERROR: You MUST understand how to connect before rebooting."
   echo "       Exiting without saving the overlay or rebooting."
   exit 1
 fi
