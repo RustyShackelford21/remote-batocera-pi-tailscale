@@ -118,17 +118,28 @@ if [ ! -c /dev/net/tun ]; then
 fi
 
 # Enable IP forwarding (check before adding)
-if ! grep -q "net.ipv4.ip_forward = 1" /etc/sysctl.conf; then
-    echo 'net.ipv4.ip_forward = 1' | tee -a /etc/sysctl.conf
+if ! grep -q "net.ipv4.ip_forward = 1" /userdata/system/sysctl.conf; then
+    echo 'net.ipv4.ip_forward = 1' | tee -a /userdata/system/sysctl.conf
 fi
-if ! grep -q "net.ipv6.conf.all.forwarding = 1" /etc/sysctl.conf; then
-    echo 'net.ipv6.conf.all.forwarding = 1' | tee -a /etc/sysctl.conf
+if ! grep -q "net.ipv6.conf.all.forwarding = 1" /userdata/system/sysctl.conf; then
+    echo 'net.ipv6.conf.all.forwarding = 1' | tee -a /userdata/system/sysctl.conf
 fi
-sysctl -p
+sysctl -p /userdata/system/sysctl.conf
 
-# Start Tailscale
-/userdata/system/tailscale/tailscaled --statedir=/userdata/system/tailscale &
-sleep 5
+# Start Tailscale, capturing output for debugging
+/userdata/system/tailscale/tailscaled --statedir=/userdata/system/tailscale > /tmp/tailscale_test/tailscaled.log 2>&1 &
+#                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Redirect output to a log file
+PID=$!  # Get the PID of tailscaled
+
+echo "Waiting for tailscaled to start (PID: $PID)..."
+sleep 10  # Increased sleep for more reliable startup
+
+# Check if tailscaled is still running
+if ! ps -p "$PID" > /dev/null; then
+    echo "ERROR: tailscaled failed to start."
+    echo "Check /tmp/tailscale_test/tailscaled.log for details." # Tell the user where to find the log
+    exit 1
+fi
 /userdata/system/tailscale/tailscale up --advertise-routes=$SUBNET --accept-routes --authkey=$AUTH_KEY --advertise-tags=tag:ssh-batocera-1 --ssh
 
 exit 0
@@ -173,13 +184,13 @@ if [ $? -ne 0 ]; then
 fi
 
 #Check IP Forwarding
-if ! grep -q "net.ipv4.ip_forward = 1" /etc/sysctl.conf; then
+if ! grep -q "net.ipv4.ip_forward = 1" /userdata/system/sysctl.conf; then
     echo "ERROR: ipv4 forwarding not enabled"
     echo "       Do NOT save the overlay or reboot until this is resolved."
     exit 1
 fi
 
-if ! grep -q "net.ipv6.conf.all.forwarding = 1" /etc/sysctl.conf; then
+if ! grep -q "net.ipv6.conf.all.forwarding = 1" /userdata/system/sysctl.conf; then
     echo "ERROR: ipv6 forwarding not enabled"
     echo "       Do NOT save the overlay or reboot until this is resolved."
     exit 1
