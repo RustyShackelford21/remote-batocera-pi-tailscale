@@ -21,7 +21,7 @@ echo "4. Click 'Generate key'."
 echo "5. IMMEDIATELY copy the *FULL* key (INCLUDING the 'tskey-auth-' prefix)."
 echo "   The key will only be displayed ONCE.  Treat it like a password."
 echo "----------------------------------------------------------------------------------------"
-read -r -p "Press Enter when you have generated and copied the key..."
+read -r -p "Press Enter when you have generated and copied the key..." </dev/tty # CORRECTED LINE
 
 # --- Configuration (Prompt for user input) ---
 
