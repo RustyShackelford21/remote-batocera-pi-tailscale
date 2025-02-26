@@ -57,11 +57,12 @@ else
 fi
 
 # --- Check if Tailscale is already installed ---
-if command_exists /userdata/system/tailscale/tailscaled; then
-  echo "Tailscale appears to be already installed in /userdata/system/tailscale."
-  echo "If you want to reinstall, please remove that directory first."
-  exit 0
-fi
+#Since we are in /tmp, we are going to skip this part.
+#if command_exists /userdata/system/tailscale/tailscaled; then
+#  echo "Tailscale appears to be already installed in /userdata/system/tailscale."
+#  echo "If you want to reinstall, please remove that directory first."
+#  exit 0
+#fi
 
 # --- Installation Steps ---
 
@@ -227,10 +228,10 @@ echo "Replace '<your_username>' with your actual Windows username."
 
 echo "------------------------------------------------------------------------"
 
-read -r -p "Have understood the above instructions (yes/no)? " KEY_READY
+read -r -p "Have you generated the SSH key on your Windows PC and do you understand how to use it (yes/no)? " KEY_READY
 
 if [[ "$KEY_READY" != "yes" ]]; then
-  echo "ERROR: You MUST understand how to connect before rebooting."
+  echo "ERROR: You MUST generate and understand how to use the SSH key before rebooting."
   echo "       Exiting without saving the overlay or rebooting."
   exit 1
 fi
