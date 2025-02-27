@@ -31,7 +31,7 @@ if [[ -z "$AUTH_KEY" ]]; then
   echo "ERROR: Auth key is required.  Exiting."
   exit 1
 fi
-if [[ ! "<span class="math-inline">AUTH\_KEY" \=\~ ^tskey\-auth\-\[a\-zA\-Z0\-9\-\]\+</span> ]]; then
+if [[ ! "$AUTH_KEY" =~ ^tskey-auth-[a-zA-Z0-9-]+$ ]]; then
   echo "ERROR: Invalid auth key format.  It should start with 'tskey-auth-'. Exiting."
   exit 1
 fi
@@ -46,7 +46,7 @@ if [[ -z "$GATEWAY_IP" ]]; then
     echo "       You will need to enter it manually."
     read -r -p "Enter your local network subnet (e.g., 192.168.1.0/24): " SUBNET
     # Validate subnet.  CORRECTED REGEX
-    if [[ ! "<span class="math-inline">SUBNET" \=\~ ^\[0\-9\]\{1,3\}\\\.\[0\-9\]\{1,3\}\\\.\[0\-9\]\{1,3\}\\\.\[0\-9\]\{1,3\}/\[0\-9\]\{1,2\}</span> ]]; then
+    if [[ ! "$SUBNET" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}/[0-9]{1,2}$ ]]; then
       echo "ERROR: Invalid subnet format. Exiting."
       exit 1
     fi
@@ -93,46 +93,67 @@ fi
 rm tailscale.tgz
 
 # --- Store Auth Key Persistently ---
-echo "<span class="math-inline">AUTH\_KEY" \> /userdata/system/tailscale/auth\_key
-chmod 600 /userdata/system/tailscale/auth\_key
-\# \-\-\- SSH Key Setup \-\-\-
-echo "Setting up SSH key\-based authentication\.\.\."
-\# Add the \*provided\* public key to authorized\_keys, but only if it's not already there\.
-if \! grep \-q "batocera\-tailscale" /root/\.ssh/authorized\_keys; then
-echo "ssh\-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINPlPUBLrsea\+vOb4E5aGwiBKDYAnoytPJHhZio76jeQ batocera\-tailscale" \>\> /root/\.ssh/authorized\_keys
+echo "$AUTH_KEY" > /userdata/system/tailscale/auth_key
+chmod 600 /userdata/system/tailscale/auth_key
+
+# --- SSH Key Setup ---
+echo "Setting up SSH key-based authentication..."
+
+# Add the *provided* public key to authorized_keys, but only if it's not already there.
+if ! grep -q "batocera-tailscale" /root/.ssh/authorized_keys; then
+    echo "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINPlPUBLrsea+vOb4E5aGwiBKDYAnoytPJHhZio76jeQ batocera-tailscale" >> /root/.ssh/authorized_keys
 fi
-chmod 700 /root/\.ssh
-chmod 600 /root/\.ssh/authorized\_keys
-\# \-\-\- End of SSH Key Setup \-\-\-
-\# Create the startup script
-cat <<EOF \> /userdata/system/scripts/tailscale\_start\.sh
-\#\!/bin/bash
-\# Stop any running instance
+chmod 700 /root/.ssh
+chmod 600 /root/.ssh/authorized_keys
+# --- End of SSH Key Setup ---
+
+
+# Create the startup script
+cat <<EOF > /userdata/system/scripts/tailscale_start.sh
+#!/bin/bash
+
+# Stop any running instance
 pkill tailscaled
-\# Ensure /dev/net directory exists
-mkdir \-p /dev/net
-\# Ensure the TUN device exists
-if \[ \! \-c /dev/net/tun \]; then
-mknod /dev/net/tun c 10 200
-chmod 600 /dev/net/tun
+
+# Ensure /dev/net directory exists
+mkdir -p /dev/net
+
+# Ensure the TUN device exists
+if [ ! -c /dev/net/tun ]; then
+  mknod /dev/net/tun c 10 200
+  chmod 600 /dev/net/tun
 fi
-\# Enable IP forwarding \(Persistent\) using /userdata/system/sysctl\.conf\.  Already done in main script\.
-\# Start Tailscale, capturing output for debugging \(to persistent location\)
-/userdata/system/tailscale/tailscaled \-\-statedir\=/userdata/system/tailscale \> /userdata/system/tailscale/tailscaled\.log 2\>&1 &
-PID\=\\$\!
-echo "Waiting for tailscaled to start \(PID\: \\$PID\)\.\.\."
-sleep 5  \#Give it some time to start
-\# Check if tailscaled is running
-if \! ps \-p "\\$PID" \> /dev/null; then
-echo "ERROR\: tailscaled failed to start\. Check /userdata/system/tailscale/tailscaled\.log"
-exit 1
+
+# Enable IP forwarding (Persistent) using /userdata/system/sysctl.conf
+if ! grep -q "net.ipv4.ip_forward = 1" /userdata/system/sysctl.conf; then
+    echo 'net.ipv4.ip_forward = 1' >> /userdata/system/sysctl.conf
 fi
-\# Load stored auth key
-AUTH\_KEY\=\\$\(cat /userdata/system/tailscale/auth\_key\)
-\# Run tailscale up with retries
-for i in \{1\.\.5\}; do
-/userdata/system/tailscale/tailscale up \-\-advertise\-routes\=\\$SUBNET \-\-accept\-routes \-\-authkey\=\\$AUTH\_KEY \-\-advertise\-tags\=tag\:ssh\-batocera\-1 \-\-ssh
-if \[ \\</span>? -eq 0 ]; then
+if ! grep -q "net.ipv6.conf.all.forwarding = 1" /userdata/system/sysctl.conf; then
+    echo 'net.ipv6.conf.all.forwarding = 1' >> /userdata/system/sysctl.conf
+fi
+sysctl -p /userdata/system/sysctl.conf
+
+
+# Start Tailscale, capturing output for debugging (to persistent location)
+/userdata/system/tailscale/tailscaled --statedir=/userdata/system/tailscale > /userdata/system/tailscale/tailscaled.log 2>&1 &
+PID=\$!
+
+echo "Waiting for tailscaled to start (PID: \$PID)..."
+sleep 5  #Give it some time to start
+
+# Check if tailscaled is running
+if ! ps -p "\$PID" > /dev/null; then
+    echo "ERROR: tailscaled failed to start. Check /userdata/system/tailscale/tailscaled.log"
+    exit 1
+fi
+
+# Load stored auth key
+AUTH_KEY=\$(cat /userdata/system/tailscale/auth_key)
+
+# Run tailscale up with retries
+for i in {1..5}; do
+    /userdata/system/tailscale/tailscale up --advertise-routes=\$SUBNET --accept-routes --authkey=\$AUTH_KEY --advertise-tags=tag:ssh-batocera-1 --ssh
+    if [ \$? -eq 0 ]; then
         echo "Tailscale successfully started."
         exit 0
     fi
@@ -176,57 +197,62 @@ fi
 
 #Check /dev/net/tun
 ls -l /dev/net/tun
-if [ <span class="math-inline">? \-ne 0 \]; then
-echo "ERROR\: /dev/net/tun not created properly"
-echo "       Do NOT save the overlay or reboot until this is resolved\."
-exit 1
+if [ $? -ne 0 ]; then
+  echo "ERROR: /dev/net/tun not created properly"
+    echo "       Do NOT save the overlay or reboot until this is resolved."
+  exit 1
 fi
-\#Check IP Forwarding using the Batocera\-specific path
-if \! grep \-q "net\.ipv4\.ip\_forward \= 1" /userdata/system/sysctl\.conf; then
-echo "ERROR\: ipv4 forwarding not enabled"
-echo "       Do NOT save the overlay or reboot until this is resolved\."
-exit 1
+
+#Check IP Forwarding using the Batocera-specific path
+if ! grep -q "net.ipv4.ip_forward = 1" /userdata/system/sysctl.conf; then
+    echo "ERROR: ipv4 forwarding not enabled"
+    echo "       Do NOT save the overlay or reboot until this is resolved."
+    exit 1
 fi
-if \! grep \-q "net\.ipv6\.conf\.all\.forwarding \= 1" /userdata/system/sysctl\.conf; then
-echo "ERROR\: ipv6 forwarding not enabled"
-echo "       Do NOT save the overlay or reboot until this is resolved\."
-exit 1
+
+if ! grep -q "net.ipv6.conf.all.forwarding = 1" /userdata/system/sysctl.conf; then
+    echo "ERROR: ipv6 forwarding not enabled"
+    echo "       Do NOT save the overlay or reboot until this is resolved."
+    exit 1
 fi
-\# Check custom\.sh
-if \[ \! \-f /userdata/system/custom\.sh \] \|\| \[ \! \-x /userdata/system/custom\.sh \];
+
+# Check custom.sh
+if [ ! -f /userdata/system/custom.sh ] || [ ! -x /userdata/system/custom.sh ];
 then
-echo "ERROR\: /userdata/system/custom\.sh is missing or is not executable\."
-echo "       Do NOT save the overlay or reboot until this is resolved\."
-exit 1
+    echo "ERROR: /userdata/system/custom.sh is missing or is not executable."
+    echo "       Do NOT save the overlay or reboot until this is resolved."
+    exit 1
 fi
-if \! grep \-q "/userdata/system/scripts/tailscale\_start\.sh &" /userdata/system/custom\.sh;
+if ! grep -q "/userdata/system/scripts/tailscale_start.sh &" /userdata/system/custom.sh;
 then
-echo "ERROR\: /userdata/system/custom\.sh does not include the startup command\."
-echo "       Do NOT save the overlay or reboot until this is resolved\."
-exit 1
+     echo "ERROR: /userdata/system/custom.sh does not include the startup command."
+     echo "       Do NOT save the overlay or reboot until this is resolved."
+     exit 1
 fi
-\# Check tailscale\_start\.sh
-if \[ \! \-f /userdata/system/scripts/tailscale\_start\.sh \] \|\| \[ \! \-x /userdata/system/scripts/tailscale\_start\.sh \];
+
+# Check tailscale_start.sh
+if [ ! -f /userdata/system/scripts/tailscale_start.sh ] || [ ! -x /userdata/system/scripts/tailscale_start.sh ];
 then
-echo "ERROR\: /userdata/system/scripts/tailscale\_start\.sh is missing or is not executable\."
-echo "       Do NOT save the overlay or reboot until this is resolved\."
-exit 1
+    echo "ERROR: /userdata/system/scripts/tailscale_start.sh is missing or is not executable."
+    echo "       Do NOT save the overlay or reboot until this is resolved."
+    exit 1
 fi
-\# \-\-\- Instructions for Using the Private Key\-\-\-
-echo "\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-\-"
-echo "All checks passed\. Tailscale appears to be installed and running correctly\."
-echo "It is now safe to save the overlay and reboot\."
+
+# --- Instructions for Using the Private Key---
+echo "------------------------------------------------------------------------"
+echo "All checks passed. Tailscale appears to be installed and running correctly."
+echo "It is now safe to save the overlay and reboot."
 echo ""
-echo "IMPORTANT\: You have already generated an SSH key pair on your Windows PC\."
-echo "          You will use the PRIVATE key from that pair to connect via SSH\."
+echo "IMPORTANT: You have already generated an SSH key pair on your Windows PC."
+echo "          You will use the PRIVATE key from that pair to connect via SSH."
 echo ""
-echo "To connect via SSH from your Windows PC, use the following command\:"
+echo "To connect via SSH from your Windows PC, use the following command:"
 echo ""
-TAILSCALE\_IP\=</span>(/userdata/system/tailscale/tailscale ip -4)
-if [[ -z "<span class="math-inline">TAILSCALE\_IP" \]\]; then
-echo "ERROR\: Could not determine Tailscale IP\. Check manually in Tailscale Admin Console\."
+TAILSCALE_IP=$(/userdata/system/tailscale/tailscale ip -4)
+if [[ -z "$TAILSCALE_IP" ]]; then
+  echo "ERROR: Could not determine Tailscale IP. Check manually in Tailscale Admin Console."
 else
-echo "  ssh \-i C\:\\\\Users\\\\<your\_username\>\\\\\.ssh\\\\id\_ed25519 root@</span>{TAILSCALE_IP}"
+  echo "  ssh -i C:\\Users\\<your_username>\\.ssh\\id_ed25519 root@${TAILSCALE_IP}"
 fi
 echo ""
 echo "Replace '<your_username>' with your actual Windows username."
@@ -235,4 +261,17 @@ echo "------------------------------------------------------------------------"
 
 read -r -p "Have you generated the SSH key on your Windows PC and do you understand how to use it (yes/no)? " KEY_READY
 
-if [[ "$KEY_READY
+if [[ "$KEY_READY" != "yes" ]]; then
+  echo "ERROR: You MUST generate and understand how to use the SSH key before rebooting."
+  echo "       Exiting without saving the overlay or rebooting."
+  exit 1
+fi
+
+# --- Save Overlay and Reboot (Only if Key Downloaded) ---
+
+echo "------------------------------------------------------------------------"
+echo "Saving overlay and rebooting in 10 seconds..."
+echo "------------------------------------------------------------------------"
+batocera-save-overlay
+sleep 10
+reboot
