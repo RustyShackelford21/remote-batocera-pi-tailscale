@@ -5,6 +5,21 @@ command_exists() {
   command -v "$1" >/dev/null 2>&1
 }
 
+# --- Restore DNS settings on exit ---
+# This function will be called if the script exits prematurely
+restore_dns() {
+  echo "Restoring original DNS settings..."
+  if [ -f "/etc/resolv.pre-tailscale-backup.conf" ]; then
+    cp -f /etc/resolv.pre-tailscale-backup.conf /etc/resolv.conf
+    echo "DNS settings restored."
+  else
+    echo "WARNING: No DNS backup found.  DNS settings may not be restored."
+  fi
+}
+
+# Trap errors and call restore_dns
+trap restore_dns EXIT
+
 # --- Instructions for Auth Key Generation ---
 echo "----------------------------------------------------------------------------------------"
 echo "Before proceeding, you need to generate a Tailscale REUSABLE auth key."
@@ -70,7 +85,7 @@ echo "Starting Tailscale installation..."
 # Create directories
 mkdir -p /userdata/system/tailscale
 mkdir -p /userdata/system/scripts
-mkdir -p /root/.ssh # Ensures that this is made *before* the grep.
+mkdir -p /root/.ssh # Ensures that this is made.
 
 # Download Tailscale
 cd /userdata/system
