@@ -161,6 +161,8 @@ EOF
 chmod +x /userdata/system/scripts/tailscale_start.sh
 
 # --- Add Startup Script to custom.sh (Avoiding Duplicates) ---
+# Ensure custom.sh exists before grepping it
+touch /userdata/system/custom.sh
 if ! grep -q "/userdata/system/scripts/tailscale_start.sh &" /userdata/system/custom.sh; then
     echo "/userdata/system/scripts/tailscale_start.sh &" >> /userdata/system/custom.sh
 fi
