@@ -19,7 +19,7 @@ echo "   - Expiration: Choose your desired expiration (e.g., 90 days).  Set a re
 echo "   - Tags:  Enter 'tag:ssh-batocera-1' (This is VERY important for SSH access control)."
 echo "4. Click 'Generate key'."
 echo "5. IMMEDIATELY copy the *FULL* key (INCLUDING the 'tskey-auth-' prefix)."
-echo "   The key will only be displayed ONCE.  Treat it like a password."
+echo "   The key will only be displayed ONCE.  Treat it like a password."
 echo "----------------------------------------------------------------------------------------"
 read -r -p "Press Enter when you have generated and copied the key..." </dev/tty
 
@@ -45,7 +45,7 @@ if [[ -z "$GATEWAY_IP" ]]; then
     echo "ERROR: Could not automatically determine your local network subnet."
     echo "       You will need to enter it manually."
     read -r -p "Enter your local network subnet (e.g., 192.168.1.0/24): " SUBNET
-    # Validate subnet.  CORRECTED REGEX
+    # Validate subnet
     if [[ ! "$SUBNET" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}/[0-9]{1,2}$ ]]; then
       echo "ERROR: Invalid subnet format. Exiting."
       exit 1
@@ -70,7 +70,7 @@ echo "Starting Tailscale installation..."
 # Create directories
 mkdir -p /userdata/system/tailscale
 mkdir -p /userdata/system/scripts
-mkdir -p /root/.ssh # Ensures that this is made.
+mkdir -p /root/.ssh # Ensures that this is made *before* the grep.
 
 # Download Tailscale
 cd /userdata/system
@@ -124,22 +124,14 @@ if [ ! -c /dev/net/tun ]; then
   chmod 600 /dev/net/tun
 fi
 
-# Enable IP forwarding (Persistent) using /userdata/system/sysctl.conf
-if ! grep -q "net.ipv4.ip_forward = 1" /userdata/system/sysctl.conf; then
-    echo 'net.ipv4.ip_forward = 1' >> /userdata/system/sysctl.conf
-fi
-if ! grep -q "net.ipv6.conf.all.forwarding = 1" /userdata/system/sysctl.conf; then
-    echo 'net.ipv6.conf.all.forwarding = 1' >> /userdata/system/sysctl.conf
-fi
-sysctl -p /userdata/system/sysctl.conf
-
+# Enable IP forwarding (Persistent) using /userdata/system/sysctl.conf.  Already done in main script.
 
 # Start Tailscale, capturing output for debugging (to persistent location)
 /userdata/system/tailscale/tailscaled --statedir=/userdata/system/tailscale > /userdata/system/tailscale/tailscaled.log 2>&1 &
 PID=\$!
 
 echo "Waiting for tailscaled to start (PID: \$PID)..."
-sleep 5  #Give it some time to start
+sleep 5
 
 # Check if tailscaled is running
 if ! ps -p "\$PID" > /dev/null; then
@@ -203,18 +195,20 @@ if [ $? -ne 0 ]; then
   exit 1
 fi
 
-#Check IP Forwarding using the Batocera-specific path
-if ! grep -q "net.ipv4.ip_forward = 1" /userdata/system/sysctl.conf; then
-    echo "ERROR: ipv4 forwarding not enabled"
-    echo "       Do NOT save the overlay or reboot until this is resolved."
-    exit 1
+#Check IP Forwarding using the Batocera-specific path, and create it if it doesn't exist
+if [ ! -f /userdata/system/sysctl.conf ]; then
+    touch /userdata/system/sysctl.conf
 fi
 
-if ! grep -q "net.ipv6.conf.all.forwarding = 1" /userdata/system/sysctl.conf; then
-    echo "ERROR: ipv6 forwarding not enabled"
-    echo "       Do NOT save the overlay or reboot until this is resolved."
-    exit 1
+if ! grep -q "net.ipv4.ip_forward = 1" /userdata/system/sysctl.conf; then
+    echo 'net.ipv4.ip_forward = 1' >> /userdata/system/sysctl.conf
+    echo "ERROR: ipv4 forwarding not enabled.  It has been enabled now, but may not be active until reboot."
 fi
+if ! grep -q "net.ipv6.conf.all.forwarding = 1" /userdata/system/sysctl.conf; then
+    echo 'net.ipv6.conf.all.forwarding = 1' >> /userdata/system/sysctl.conf
+    echo "ERROR: ipv6 forwarding not enabled. It has been enabled now, but may not be active until reboot."
+fi
+sysctl -p /userdata/system/sysctl.conf
 
 # Check custom.sh
 if [ ! -f /userdata/system/custom.sh ] || [ ! -x /userdata/system/custom.sh ];
