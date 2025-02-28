@@ -115,26 +115,6 @@ if ! grep -q '^tun$' /etc/modules; then
   batocera-save-overlay  # Ensure persistence of /etc/modules change!
 fi
 
-# --- Initial tailscale up with retries.
-/userdata/system/tailscale/bin/tailscaled --state=/userdata/system/tailscale/tailscaled.state &
-sleep 5
-/bin/bash -c '
-  for i in {1..3}; do
-    /userdata/system/tailscale/bin/tailscale up --advertise-routes=$SUBNET --snat-subnet-routes=false --accept-routes --authkey=$(cat /userdata/system/tailscale/authkey) --hostname=batocera-1 >> /userdata/system/tailscale/tailscale_up.log 2>&1
-    if [ $? -eq 0 ]; then
-      echo "Tailscale connected successfully." >> /userdata/system/tailscale/tailscale_up.log
-      break
-    else
-      echo "Retrying Tailscale up in 5 seconds..." >> /userdata/system/tailscale/tailscale_up.log
-      sleep 5
-    fi
-  done
-  if [ $? -ne 0 ]; then
-     echo "Tailscale failed to start after multiple retries.  Check the log file." >> /userdata/system/tailscale/tailscale_up.log
-     exit 1
-  fi
-'
-
 # --- Startup (custom.sh) ---
 # Use a temporary file to avoid issues with quotes and variable expansion.
 rm -f /tmp/tailscale_custom.sh #Remove any left over temp file.
@@ -153,6 +133,9 @@ fi
 EOF
 chmod +x /tmp/tailscale_custom.sh
 mv /tmp/tailscale_custom.sh /userdata/system/custom.sh
+
+# --- Run custom.sh IMMEDIATELY for initial setup ---
+/bin/bash /userdata/system/custom.sh
 
 
 # --- Verification and Prompt Before Reboot ---
@@ -212,7 +195,7 @@ else
 
     echo "-------------------------------------------------------------------------"
     echo "Tailscale and SSH verification successful! It is now safe to save changes."
-    read -r -p "Do you want to save changes and reboot? THIS IS IRREVERSIBLE (yes/no) " SAVE_CHANGES
+     read -r -p "Do you want to save changes and reboot? THIS IS IRREVERSIBLE (yes/no) " SAVE_CHANGES
 
     if [[ "$SAVE_CHANGES" == "yes" ]]; then
         #Remove potentially conflicting iptables rules.
