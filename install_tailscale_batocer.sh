@@ -5,22 +5,6 @@
 AUTH_KEY=""
 # !! IMPORTANT !! Check https://pkgs.tailscale.com/stable/ for the latest arm64 version!
 TAILSCALE_VERSION="1.80.2"
-DEBUG=false  # Set to 'true' to enable debug output
-
-# --- Color Definitions ---
-GREEN='\033[0;32m'
-RED='\033[0;31m'
-NC='\033[0m' # No Color
-
-
-# --- Functions ---
-# Function to validate subnet
-validate_subnet() {
-    if [[ ! "$1" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}/[0-9]{1,2}$ ]]; then
-        echo -e "${RED}ERROR: Invalid subnet format. Exiting.${NC}"
-        exit 1
-    fi
-}
 
 # --- Automatic Subnet Detection ---
 
@@ -32,7 +16,10 @@ if [[ -z "$GATEWAY_IP" ]]; then
     echo "       You will need to enter it manually."
     read -r -p "Enter your local network subnet (e.g., 192.168.1.0/24): " SUBNET
     # Validate subnet
-    validate_subnet "$SUBNET"
+    if [[ ! "$SUBNET" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}/[0-9]{1,2}$ ]]; then
+      echo "ERROR: Invalid subnet format. Exiting."
+      exit 1
+    fi
 else
   # Extract the subnet from the gateway IP (assuming a /24 subnet mask)
   SUBNET=$(echo "$GATEWAY_IP" | awk -F. '{print $1"."$2"."$3".0/24"}')
@@ -43,7 +30,10 @@ else
   if [[ "$SUBNET_CONFIRM" != "yes" ]]; then
       read -r -p "Enter your local network subnet (e.g., 192.168.1.0/24): " SUBNET
       # Validate subnet
-      validate_subnet "$SUBNET"
+      if [[ ! "$SUBNET" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}/[0-9]{1,2}$ ]]; then
+        echo "ERROR: Invalid subnet format. Exiting."
+        exit 1
+      fi
   fi
 fi
 
@@ -66,11 +56,11 @@ if [[ -z "$AUTH_KEY" ]]; then
     echo "----------------------------------------------------------------------------------------"
     read -r -p "Enter your Tailscale reusable auth key (with tskey-auth- prefix): " AUTH_KEY
     if [[ -z "$AUTH_KEY" ]]; then
-        echo -e "${RED}ERROR: Auth key is required.  Exiting.${NC}"
+        echo "ERROR: Auth key is required.  Exiting."
         exit 1
     fi
     if [[ ! "$AUTH_KEY" =~ ^tskey-auth-[a-zA-Z0-9-]+$ ]]; then
-        echo -e "${RED}ERROR: Invalid auth key format.  It should start with 'tskey-auth-'. Exiting.${NC}"
+        echo "ERROR: Invalid auth key format.  It should start with 'tskey-auth-'. Exiting."
         exit 1
     fi
 fi
@@ -87,14 +77,14 @@ mkdir -p /userdata/system/tailscale
 # Download Tailscale
 wget -O /tmp/tailscale.tgz https://pkgs.tailscale.com/stable/tailscale_${TAILSCALE_VERSION}_arm64.tgz
 if [ $? -ne 0 ]; then
-    echo -e "${RED}ERROR: Failed to download Tailscale. Exiting.${NC}"
+    echo "ERROR: Failed to download Tailscale. Exiting."
     exit 1
 fi
 
 # Extract Tailscale
 tar -xf /tmp/tailscale.tgz -C /tmp
 if [ $? -ne 0 ]; then
-     echo -e "${RED}ERROR: Failed to download Tailscale. Exiting.${NC}"
+    echo "ERROR: Failed to extract Tailscale. Exiting."
     exit 1
 fi
 rm /tmp/tailscale.tgz
@@ -120,24 +110,11 @@ cat <<EOF > /tmp/tailscale_custom.sh
 if ! pgrep -f "/userdata/system/tailscale/bin/tailscaled" > /dev/null; then
   /userdata/system/tailscale/bin/tailscaled --state=/userdata/system/tailscale/tailscaled.state &
   sleep 5
-  # Restore authkey if missing
-  if [ ! -f /userdata/system/tailscale/authkey ]; then
-    cp /userdata/system/tailscale/authkey.bak /userdata/system/tailscale/authkey
-  fi
-  export TS_AUTHKEY=$(cat /userdata/system/tailscale/authkey)
-  for i in {1..3}; do
-    /userdata/system/tailscale/bin/tailscale up --advertise-routes=$SUBNET --snat-subnet-routes=false --accept-routes --authkey=\$TS_AUTHKEY --hostname=batocera-1 >> /userdata/system/tailscale/tailscale_up.log 2>&1
-    if [ \$? -eq 0 ]; then
-      echo "Tailscale connected successfully." >> /userdata/system/tailscale/tailscale_up.log
-      break
-    else
-      echo "Retrying Tailscale up in 5 seconds..." >> /userdata/system/tailscale/tailscale_up.log
-      sleep 5
-    fi
-  done
+  echo "$AUTH_KEY" > /userdata/system/tailscale/authkey
+  chmod 600 /userdata/system/tailscale/authkey
+  /userdata/system/tailscale/bin/tailscale up --advertise-routes=$SUBNET --snat-subnet-routes=false --accept-routes --authkey=$(cat /userdata/system/tailscale/authkey) --hostname=batocera-1 >> /userdata/system/tailscale/tailscale_up.log 2>&1
   if [ $? -ne 0 ]; then
-      echo "Tailscale failed to start. Disabling..." >> /userdata/system/tailscale/tailscale_up.log
-      exit 1
+      echo "Tailscale failed to start after multiple retries.  Check the log file." >> /userdata/system/tailscale/tailscale_up.log
   fi
 fi
 EOF
@@ -145,36 +122,31 @@ chmod +x /tmp/tailscale_custom.sh
 mv /tmp/tailscale_custom.sh /userdata/system/custom.sh
 
 # --- Verification and Prompt Before Reboot ---
-echo -e "${GREEN}------------------------------------------------------------------------${NC}"
-echo -e "${GREEN}Tailscale installation completed.  Performing verification checks...${NC}"
-echo -e "${GREEN}------------------------------------------------------------------------${NC}"
+echo "------------------------------------------------------------------------"
+echo "Tailscale installation completed.  Performing verification checks..."
+echo "------------------------------------------------------------------------"
 
 # Check Tailscale Status (Give it a few seconds to start)
 echo "Waiting for Tailscale to start..."
 for i in {1..30}; do
     if /userdata/system/tailscale/bin/tailscale status &>/dev/null; then
-        echo -e "${GREEN}✅ Tailscale is running!${NC}"
+        echo "✅ Tailscale is running!"
         break
     fi
     sleep 2
 done
-
-if [[ "$DEBUG" == "true" ]]; then
-    echo "DEBUG: Tailscale status output:"
-    /userdata/system/tailscale/bin/tailscale status
-fi
-
+/userdata/system/tailscale/bin/tailscale status
 TAILSCALE_STATUS_EXIT_CODE=$?
 
 # Check for tailscale0 interface
 ip a | grep tailscale0
 IP_A_EXIT_CODE=$?
 
-echo -e "${GREEN}------------------------------------------------------------------------${NC}"
+echo "------------------------------------------------------------------------"
 if [ "$TAILSCALE_STATUS_EXIT_CODE" -ne 0 ] || [ "$IP_A_EXIT_CODE" -ne 0 ]; then
-    echo -e "${RED}ERROR: Tailscale verification failed.  Check the output above for errors.${NC}"
-    echo -e "${RED}       Do NOT save the overlay or reboot until this is resolved.${NC}"
-    echo -e "${RED}       You may need to run the tailscale up command manually.${NC}"
+    echo "ERROR: Tailscale verification failed.  Check the output above for errors."
+    echo "       Do NOT save the overlay or reboot until this is resolved."
+    echo "       You may need to run the tailscale up command manually."
     exit 1
 else
     echo "Tailscale appears to be running correctly."
@@ -182,7 +154,7 @@ else
     # Fetch the Tailscale IP automatically
     TAILSCALE_IP=$(/userdata/system/tailscale/bin/tailscale ip -4)
     if [[ -z "$TAILSCALE_IP" ]]; then
-        echo -e "${RED}ERROR: Could not retrieve Tailscale IP. Check 'tailscale status'.${NC}"
+        echo "ERROR: Could not retrieve Tailscale IP. Check 'tailscale status'."
         exit 1
     fi
     echo "Your Tailscale IP is: $TAILSCALE_IP"
@@ -199,13 +171,13 @@ else
             echo "Retrying SSH check..."
             /userdata/system/tailscale/bin/tailscale status
         else
-            echo -e "${RED}ERROR: Tailscale SSH did not work. Do NOT save the overlay or reboot.${NC}"
+            echo "ERROR: Tailscale SSH did not work. Do NOT save the overlay or reboot."
             exit 1
         fi
     done
 
-    echo -e "${GREEN}-------------------------------------------------------------------------${NC}"
-    echo -e "${GREEN}Tailscale and SSH verification successful! It is now safe to save changes.${NC}"
+    echo "-------------------------------------------------------------------------"
+    echo "Tailscale and SSH verification successful! It is now safe to save changes."
     read -r -p "Do you want to save changes and reboot? THIS IS IRREVERSIBLE (yes/no) " SAVE_CHANGES
 
     if [[ "$SAVE_CHANGES" == "yes" ]]; then
@@ -218,11 +190,6 @@ iptables-restore < /userdata/system/iptables.rules
 EOF
         chmod +x /userdata/system/services/iptablesload.sh
         batocera-services enable iptablesload
-
-        # Store the auth key in a backup location, and original location
-        echo "$AUTH_KEY" > /userdata/system/tailscale/authkey
-        cp /userdata/system/tailscale/authkey /userdata/system/tailscale/authkey.bak
-        chmod 600 /userdata/system/tailscale/authkey
 
         echo ""
         echo "Saving overlay..."
