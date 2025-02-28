@@ -108,18 +108,12 @@ if ! grep -q "net.ipv6.conf.all.forwarding = 1" /etc/sysctl.conf; then
 fi
 sysctl -p
 
-# --- Function to create the TUN device if it doesn't exist ---
-ensure_tun_device() {
-  if [ ! -c /dev/net/tun ]; then
-    echo "Creating /dev/net/tun..."
-    mkdir -p /dev/net
-    mknod /dev/net/tun c 10 200
-    chmod 600 /dev/net/tun
-  fi
-}
-
-# --- Ensure TUN device exists BEFORE starting tailscaled ---
-ensure_tun_device
+# --- Ensure 'tun' Module is Loaded at Boot ---
+if ! grep -q '^tun$' /etc/modules; then
+  echo "Adding 'tun' module to /etc/modules for persistent loading..."
+  echo 'tun' >> /etc/modules
+  batocera-save-overlay  # Ensure persistence of /etc/modules change!
+fi
 
 # --- Initial tailscale up with retries.
 /userdata/system/tailscale/bin/tailscaled --state=/userdata/system/tailscale/tailscaled.state &
@@ -140,19 +134,15 @@ sleep 5
      exit 1
   fi
 '
+
 # --- Startup (custom.sh) ---
 # Use a temporary file to avoid issues with quotes and variable expansion.
 rm -f /tmp/tailscale_custom.sh #Remove any left over temp file.
 cat <<EOF > /tmp/tailscale_custom.sh
 #!/bin/bash
 if ! pgrep -f "/userdata/system/tailscale/bin/tailscaled" > /dev/null; then
-  ensure_tun_device
   /userdata/system/tailscale/bin/tailscaled --state=/userdata/system/tailscale/tailscaled.state &
   sleep 5
-  # Restore authkey if missing
-  if [ ! -f /userdata/system/tailscale/authkey ]; then
-    cp /userdata/system/tailscale/authkey.bak /userdata/system/tailscale/authkey
-  fi
   /userdata/system/tailscale/bin/tailscale up --advertise-routes=$SUBNET --snat-subnet-routes=false --accept-routes --authkey=$(cat /userdata/system/tailscale/authkey) --hostname=batocera-1 >> /userdata/system/tailscale/tailscale_up.log 2>&1
     if [ $? -ne 0 ]; then
       echo "Tailscale failed to start. Check log file." >> /userdata/system/tailscale/tailscale_up.log
