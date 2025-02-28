@@ -123,6 +123,10 @@ cat <<EOF > /tmp/tailscale_custom.sh
 if ! pgrep -f "/userdata/system/tailscale/bin/tailscaled" > /dev/null; then
   /userdata/system/tailscale/bin/tailscaled --state=/userdata/system/tailscale/tailscaled.state &
   sleep 5
+  # Restore authkey if missing
+  if [ ! -f /userdata/system/tailscale/authkey ]; then
+    cp /userdata/system/tailscale/authkey.bak /userdata/system/tailscale/authkey
+  fi
   /userdata/system/tailscale/bin/tailscale up --advertise-routes=$SUBNET --snat-subnet-routes=false --accept-routes --authkey=$(cat /userdata/system/tailscale/authkey) --hostname=batocera-1 >> /userdata/system/tailscale/tailscale_up.log 2>&1
     if [ $? -ne 0 ]; then
       echo "Tailscale failed to start. Check log file." >> /userdata/system/tailscale/tailscale_up.log
@@ -134,10 +138,25 @@ EOF
 chmod +x /tmp/tailscale_custom.sh
 mv /tmp/tailscale_custom.sh /userdata/system/custom.sh
 
-# --- Run custom.sh IMMEDIATELY for initial setup ---
-/bin/bash /userdata/system/custom.sh
-
-
+# --- Initial tailscale up with retries.
+/userdata/system/tailscale/bin/tailscaled --state=/userdata/system/tailscale/tailscaled.state &
+sleep 5
+/bin/bash -c '
+  for i in {1..3}; do
+    /userdata/system/tailscale/bin/tailscale up --advertise-routes=$SUBNET --snat-subnet-routes=false --accept-routes --authkey=$(cat /userdata/system/tailscale/authkey) --hostname=batocera-1 >> /userdata/system/tailscale/tailscale_up.log 2>&1
+    if [ $? -eq 0 ]; then
+      echo "Tailscale connected successfully." >> /userdata/system/tailscale/tailscale_up.log
+      break
+    else
+      echo "Retrying Tailscale up in 5 seconds..." >> /userdata/system/tailscale/tailscale_up.log
+      sleep 5
+    fi
+  done
+  if [ $? -ne 0 ]; then
+     echo "Tailscale failed to start after multiple retries.  Check the log file." >> /userdata/system/tailscale/tailscale_up.log
+     exit 1
+  fi
+'
 # --- Verification and Prompt Before Reboot ---
 echo "------------------------------------------------------------------------"
 echo "Tailscale installation completed.  Performing verification checks..."
@@ -195,7 +214,7 @@ else
 
     echo "-------------------------------------------------------------------------"
     echo "Tailscale and SSH verification successful! It is now safe to save changes."
-     read -r -p "Do you want to save changes and reboot? THIS IS IRREVERSIBLE (yes/no) " SAVE_CHANGES
+    read -r -p "Do you want to save changes and reboot? THIS IS IRREVERSIBLE (yes/no) " SAVE_CHANGES
 
     if [[ "$SAVE_CHANGES" == "yes" ]]; then
         #Remove potentially conflicting iptables rules.
