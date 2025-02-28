@@ -74,6 +74,12 @@ mkdir -p /userdata/system/tailscale/bin
 mkdir -p /run/tailscale
 mkdir -p /userdata/system/tailscale
 
+# --- Store Auth Key Immediately! ---
+echo "$AUTH_KEY" > /userdata/system/tailscale/authkey
+cp /userdata/system/tailscale/authkey /userdata/system/tailscale/authkey.bak
+chmod 600 /userdata/system/tailscale/authkey
+echo "✅ Auth key successfully stored."
+
 # Download Tailscale
 wget -O /tmp/tailscale.tgz https://pkgs.tailscale.com/stable/tailscale_${TAILSCALE_VERSION}_arm64.tgz
 if [ $? -ne 0 ]; then
@@ -107,28 +113,10 @@ sysctl -p
 rm -f /tmp/tailscale_custom.sh #Remove any left over temp file.
 cat <<EOF > /tmp/tailscale_custom.sh
 #!/bin/bash
-
-# Function to create the TUN device if it doesn't exist
-ensure_tun_device() {
-  if [ ! -c /dev/net/tun ]; then
-    echo "Creating /dev/net/tun..."
-    mkdir -p /dev/net
-    mknod /dev/net/tun c 10 200
-    chmod 600 /dev/net/tun
-  fi
-}
-
 if ! pgrep -f "/userdata/system/tailscale/bin/tailscaled" > /dev/null; then
-  # Ensure the TUN device exists *before* starting tailscaled
-  ensure_tun_device
   /userdata/system/tailscale/bin/tailscaled --state=/userdata/system/tailscale/tailscaled.state &
   sleep 5
-  # Restore authkey if missing
-  if [ ! -f /userdata/system/tailscale/authkey ]; then
-    cp /userdata/system/tailscale/authkey.bak /userdata/system/tailscale/authkey
-  fi
-  export TS_AUTHKEY=$(cat /userdata/system/tailscale/authkey)
-  /userdata/system/tailscale/bin/tailscale up --advertise-routes=$SUBNET --snat-subnet-routes=false --accept-routes --authkey=\$TS_AUTHKEY --hostname=batocera-1 >> /userdata/system/tailscale/tailscale_up.log 2>&1
+  /userdata/system/tailscale/bin/tailscale up --advertise-routes=$SUBNET --snat-subnet-routes=false --accept-routes --authkey=$(cat /userdata/system/tailscale/authkey) --hostname=batocera-1 >> /userdata/system/tailscale/tailscale_up.log 2>&1
     if [ $? -ne 0 ]; then
       echo "Tailscale failed to start after multiple retries.  Check the log file." >> /userdata/system/tailscale/tailscale_up.log
       exit 1
@@ -137,8 +125,26 @@ fi
 EOF
 chmod +x /tmp/tailscale_custom.sh
 mv /tmp/tailscale_custom.sh /userdata/system/custom.sh
-/bin/bash /userdata/system/custom.sh
 
+# --- Initial tailscale up with retries.
+/userdata/system/tailscale/bin/tailscaled --state=/userdata/system/tailscale/tailscaled.state &
+sleep 5
+/bin/bash -c '
+  for i in {1..3}; do
+    /userdata/system/tailscale/bin/tailscale up --advertise-routes=$SUBNET --snat-subnet-routes=false --accept-routes --authkey=$(cat /userdata/system/tailscale/authkey) --hostname=batocera-1 >> /userdata/system/tailscale/tailscale_up.log 2>&1
+    if [ $? -eq 0 ]; then
+      echo "Tailscale connected successfully." >> /userdata/system/tailscale/tailscale_up.log
+      break
+    else
+      echo "Retrying Tailscale up in 5 seconds..." >> /userdata/system/tailscale/tailscale_up.log
+      sleep 5
+    fi
+  done
+  if [ $? -ne 0 ]; then
+     echo "Tailscale failed to start after multiple retries.  Check the log file." >> /userdata/system/tailscale/tailscale_up.log
+     exit 1
+  fi
+'
 # --- Verification and Prompt Before Reboot ---
 echo "------------------------------------------------------------------------"
 echo "Tailscale installation completed.  Performing verification checks..."
@@ -208,11 +214,6 @@ iptables-restore < /userdata/system/iptables.rules
 EOF
         chmod +x /userdata/system/services/iptablesload.sh
         batocera-services enable iptablesload
-
-    # Store the auth key in a backup location, and original location
-    echo "$AUTH_KEY" > /userdata/system/tailscale/authkey
-    cp /userdata/system/tailscale/authkey /userdata/system/tailscale/authkey.bak
-    chmod 600 /userdata/system/tailscale/authkey
 
         echo ""
         echo "Saving overlay..."
