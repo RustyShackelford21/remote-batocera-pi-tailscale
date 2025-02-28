@@ -110,12 +110,16 @@ cat <<EOF > /tmp/tailscale_custom.sh
 if ! pgrep -f "/userdata/system/tailscale/bin/tailscaled" > /dev/null; then
   /userdata/system/tailscale/bin/tailscaled --state=/userdata/system/tailscale/tailscaled.state &
   sleep 5
-  echo "$AUTH_KEY" > /userdata/system/tailscale/authkey
-  chmod 600 /userdata/system/tailscale/authkey
-  /userdata/system/tailscale/bin/tailscale up --advertise-routes=$SUBNET --snat-subnet-routes=false --accept-routes --authkey=$(cat /userdata/system/tailscale/authkey) --hostname=batocera-1 >> /userdata/system/tailscale/tailscale_up.log 2>&1
-  if [ $? -ne 0 ]; then
-      echo "Tailscale failed to start after multiple retries.  Check the log file." >> /userdata/system/tailscale/tailscale_up.log
+  # Restore authkey if missing
+  if [ ! -f /userdata/system/tailscale/authkey ]; then
+    cp /userdata/system/tailscale/authkey.bak /userdata/system/tailscale/authkey
   fi
+  export TS_AUTHKEY=\$(cat /userdata/system/tailscale/authkey)
+  /userdata/system/tailscale/bin/tailscale up --advertise-routes=$SUBNET --snat-subnet-routes=false --accept-routes --authkey=\$TS_AUTHKEY --hostname=batocera-1 >> /userdata/system/tailscale/tailscale_up.log 2>&1
+    if [ $? -ne 0 ]; then
+      echo "Tailscale failed to start after multiple retries.  Check the log file." >> /userdata/system/tailscale/tailscale_up.log
+      exit 1
+    fi
 fi
 EOF
 chmod +x /tmp/tailscale_custom.sh
@@ -190,6 +194,11 @@ iptables-restore < /userdata/system/iptables.rules
 EOF
         chmod +x /userdata/system/services/iptablesload.sh
         batocera-services enable iptablesload
+
+    # Store the auth key in a backup location, and original location
+    echo "$AUTH_KEY" > /userdata/system/tailscale/authkey
+    cp /userdata/system/tailscale/authkey /userdata/system/tailscale/authkey.bak
+    chmod 600 /userdata/system/tailscale/authkey
 
         echo ""
         echo "Saving overlay..."
