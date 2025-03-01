@@ -1,5 +1,5 @@
 #!/bin/sh
-# Tailscale Automated Installer for Batocera
+# Tailscale Automated Installer for Batocera - Subnet Router
 # Author: RustyShackelford21
 # GitHub: https://github.com/RustyShackelford21/remote-batocera-pi-tailscale
 # Date: February 28, 2025
@@ -36,12 +36,12 @@ modprobe tun || { echo -e "${RED}❌ Failed to load TUN.${NC}"; exit 1; }
 GATEWAY_IP=$(ip route show default | awk '/default/ {print $3}')
 if [ -z "$GATEWAY_IP" ]; then
     echo -e "${YELLOW}⚠️ No subnet detected.${NC}"
-    read -p "Enter subnet (e.g., 192.168.1.0/24): " SUBNET
+    read -p "Enter subnet to advertise (e.g., 192.168.1.0/24): " SUBNET
 else
     SUBNET=$(echo "$GATEWAY_IP" | awk -F. '{print $1"."$2"."$3".0/24"}')
-    echo -e "${GREEN}✅ Detected subnet: $SUBNET${NC}"
+    echo -e "${GREEN}✅ Detected subnet to advertise: $SUBNET${NC}"
     read -p "Correct? (y/n): " SUBNET_CONFIRM
-    [ "$SUBNET_CONFIRM" != "y" ] && read -p "Enter subnet: " SUBNET
+    [ "$SUBNET_CONFIRM" != "y" ] && read -p "Enter subnet to advertise: " SUBNET
 fi
 if ! echo "$SUBNET" | grep -qE '^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}/[0-9]{1,2}$'; then
     echo -e "${RED}❌ Invalid subnet.${NC}"
@@ -150,6 +150,16 @@ while true; do
         exit 1
     fi
 done
+
+# Verify subnet routing
+echo -e "${YELLOW}🔍 Verifying subnet routing...${NC}"
+SUBNET_CHECK=$(/userdata/system/tailscale/bin/tailscale status | grep "$SUBNET")
+if [ -n "$SUBNET_CHECK" ]; then
+    echo -e "${GREEN}✅ Subnet $SUBNET is being advertised.${NC}"
+else
+    echo -e "${RED}❌ Subnet $SUBNET not advertised. Check Tailscale admin console or logs.${NC}"
+    exit 1
+fi
 
 # iptables cleanup
 echo -e "${YELLOW}🔧 Adjusting iptables...${NC}"
