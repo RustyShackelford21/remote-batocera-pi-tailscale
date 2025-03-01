@@ -120,14 +120,14 @@ mv /tmp/tailscale_*_arm64/tailscale /tmp/tailscale_*_arm64/tailscaled /userdata/
 rm -rf /tmp/tailscale_*_arm64  # Clean up the extracted directory
 
 # --- Ensure 'tun' Module is Loaded at Boot ---
-if ! grep -q '^tun$' /etc/modules; then
-  echo -e "${YELLOW}➕ Adding 'tun' module to /etc/modules for persistent loading...${NC}"
-  mount -o remount,rw /  # Make the root filesystem writable
-  echo 'tun' >> /etc/modules
-  mount -o remount,ro /  # Remount as read-only
-  batocera-save-overlay  # Ensure persistence of /etc/modules change!
+#     Add 'tun' to batocera-boot.conf
+if ! grep -q '^modules-load=tun$' /boot/batocera-boot.conf; then
+  echo -e "${YELLOW}➕ Adding 'tun' module to batocera-boot.conf for persistent loading...${NC}"
+  mount -o remount,rw /boot  # Make the /boot filesystem writable
+  echo 'modules-load=tun' >> /boot/batocera-boot.conf
+  mount -o remount,ro /boot  # Remount as read-only
 fi
-modprobe tun # Load immediately
+modprobe tun
 
 # Enable IP forwarding (check before adding to avoid duplicates)
 if ! grep -q "net.ipv4.ip_forward = 1" /etc/sysctl.conf; then
@@ -144,7 +144,7 @@ rm -f /tmp/tailscale_custom.sh #Remove any left over temp file.
 cat <<EOF > /tmp/tailscale_custom.sh
 #!/bin/sh
 if ! pgrep -f "/userdata/system/tailscale/bin/tailscaled" > /dev/null; then
-  /userdata/system/tailscale/bin/tailscaled --state=/userdata/system/tailscale &
+  /userdata/system/tailscale/bin/tailscaled --state=/userdata/system/tailscale/tailscaled.state &
   sleep 10
   # Restore authkey if missing
   if [ ! -f /userdata/system/tailscale/authkey ]; then
