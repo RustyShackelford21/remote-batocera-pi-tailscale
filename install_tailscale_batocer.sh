@@ -10,9 +10,8 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
-# Configuration (can be overridden via environment variables)
+# Configuration (TAILSCALE_VERSION can still be overridden via environment variable)
 TAILSCALE_VERSION="${TAILSCALE_VERSION:-1.80.2}"  # Default if not set
-AUTH_KEY="${AUTH_KEY:-}"  # Empty default prompts user
 
 echo -e "${YELLOW}🚀 Tailscale Installer for Batocera${NC}"
 
@@ -49,17 +48,15 @@ if ! echo "$SUBNET" | grep -qE '^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}/
     exit 1
 fi
 
-# Auth key
-if [ -z "$AUTH_KEY" ]; then
-    echo -e "${YELLOW}🔑 Generate a reusable auth key:${NC}"
-    echo "  https://login.tailscale.com/admin/settings/keys"
-    echo "  - Reusable: Enabled"
-    echo "  - Ephemeral: Disabled"
-    echo "  - Tags: tag:ssh-batocera-1"
-    read -p "Enter key (tskey-auth-...): " AUTH_KEY
-fi
+# Auth key (always prompt, no default)
+echo -e "${YELLOW}🔑 Generate a reusable auth key:${NC}"
+echo "  https://login.tailscale.com/admin/settings/keys"
+echo "  - Reusable: Enabled"
+echo "  - Ephemeral: Disabled"
+echo "  - Tags: tag:ssh-batocera-1"
+read -p "Enter your Tailscale auth key (tskey-auth-...): " AUTH_KEY
 if [ -z "$AUTH_KEY" ] || ! echo "$AUTH_KEY" | grep -q '^tskey-auth-'; then
-    echo -e "${RED}❌ Invalid auth key.${NC}"
+    echo -e "${RED}❌ Invalid or missing auth key.${NC}"
     exit 1
 fi
 mkdir -p /userdata/system/tailscale
