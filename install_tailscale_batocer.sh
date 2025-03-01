@@ -1,247 +1,107 @@
 #!/bin/bash
 
-# --- Configuration ---
-# Get auth key from argument 1, or prompt if not provided
-AUTH_KEY="${1:-}"  # Use $1 (first argument) if provided, otherwise empty string.
-# !! IMPORTANT !! Check https://pkgs.tailscale.com/stable/ for the latest arm64 version!
-TAILSCALE_VERSION="${2:-1.80.2}"  # Use $2 (second arg) if provided, otherwise default.
+echo "------------------------------------------------------------"
+echo " 🏁 Welcome to the Batocera Tailscale Installer"
+echo "------------------------------------------------------------"
 
-# --- Colors for output ---
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-NC='\033[0m' # No Color
+# --- Prompt for Tailscale Auth Key ---
+echo "To continue, you need a Tailscale auth key."
+echo "Generate one here: https://login.tailscale.com/admin/settings/keys"
+echo "Make sure to enable:"
+echo " - ✅ Reusable"
+echo " - ✅ Ephemeral"
+echo " - 🏷️  Tags: 'tag:ssh-batocera-1'"
+echo ""
+read -r -p "Enter your Tailscale auth key: " AUTH_KEY
+AUTH_KEY=$(echo "$AUTH_KEY" | tr -d '[:space:]')  # Trim accidental spaces/newlines
 
-# --- Functions ---
-
-# Function to validate a subnet in CIDR notation
-validate_subnet() {
-    if [[ ! "$1" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}/[0-9]{1,2}$ ]]; then
-        echo -e "${RED}ERROR: Invalid subnet format. Exiting.${NC}"
-        exit 1
-    fi
-}
-
-# --- Script Start ---
-
-echo -e "${YELLOW}🚀 Tailscale Installer for Batocera - Raspberry Pi 5${NC}"
-
-# --- Root Check ---
-if [ "$(id -u)" -ne 0 ]; then
-    echo -e "${RED}⚠️  This script must be run as root (or with sudo).${NC}"
+# Ensure the key is valid
+if [[ -z "$AUTH_KEY" ]] || [[ ! "$AUTH_KEY" =~ ^tskey-auth-[a-zA-Z0-9-]+$ ]]; then
+    echo "❌ ERROR: Invalid or missing auth key. Exiting."
     exit 1
 fi
 
-# --- User Confirmation ---
-if [ -z "$CONFIRM_INSTALL" ] || [ "$CONFIRM_INSTALL" != "yes" ]; then
-  read -r -p "This script will install and configure Tailscale on your Batocera system. Continue? (yes/no): " CONFIRM
-  if [[ "$CONFIRM" != "yes" ]]; then
-    echo -e "${RED}❌ Installation cancelled by user.${NC}"
-    exit 1
-  fi
-fi
+# --- Define variables ---
+TAILSCALE_VERSION="1.80.2"
+INSTALL_DIR="/userdata/system/tailscale"
+BIN_DIR="$INSTALL_DIR/bin"
+STATE_DIR="$INSTALL_DIR/state"
+CUSTOM_SCRIPT="/userdata/system/custom.sh"
 
-# --- Automatic Subnet Detection ---
+echo "✅ Auth key captured successfully."
 
-# Get the default gateway IP address
-GATEWAY_IP=$(ip route show default | awk '/default/ {print $3}')
-
-if [[ -z "$GATEWAY_IP" ]]; then
-    echo -e "${YELLOW}WARNING: Could not automatically determine your local network subnet.${NC}"
-    read -r -p "Enter your local network subnet (e.g., 192.168.1.0/24): " SUBNET
-    validate_subnet "$SUBNET"
-else
-    # Extract the subnet from the gateway IP (assuming a /24 subnet mask)
-    SUBNET=$(echo "$GATEWAY_IP" | awk -F. '{print $1"."$2"."$3".0/24"}')
-    echo -e "${GREEN}✅ Detected local subnet: $SUBNET${NC}"
-
-    # --- Subnet Confirmation ---
-    read -r -p "Is this subnet correct? (yes/no): " SUBNET_CONFIRM
-    if [[ "$SUBNET_CONFIRM" != "yes" ]]; then
-        read -r -p "Enter your local network subnet (e.g., 192.168.1.0/24): " SUBNET
-        validate_subnet "$SUBNET"
-    fi
-fi
-
-# --- Check for Auth Key ---
-if [[ -z "$AUTH_KEY" ]]; then
-    echo -e "${YELLOW}🔑 Please generate a Tailscale REUSABLE and EPHEMERAL auth key:${NC}"
-    echo "   Go to: https://login.tailscale.com/admin/settings/keys"
-    echo "   - Reusable: ENABLED"
-    echo "   - Ephemeral: ENABLED"
-    echo "   - Tags: tag:ssh-batocera-1"
-    read -r -p "Enter your Tailscale auth key (tskey-auth-...): " AUTH_KEY
-fi
-if [ -z "$AUTH_KEY" ] || ! echo "$AUTH_KEY" | grep -q '^tskey-auth-'; then
-    echo -e "${RED}❌ Invalid or missing auth key.${NC}"
-    exit 1
-fi
-
-# --- Installation Steps ---
-
-echo -e "${GREEN}📥 Installing Tailscale...${NC}"
-
-# Create directories
-mkdir -p /userdata/system/tailscale/bin
-mkdir -p /run/tailscale
-mkdir -p /userdata/system/tailscale
-
-# --- Store Auth Key Immediately! ---
-echo "$AUTH_KEY" > /userdata/system/tailscale/authkey
-cp /userdata/system/tailscale/authkey /userdata/system/tailscale/authkey.bak  # Create backup
-chmod 600 /userdata/system/tailscale/authkey
-echo -e "${GREEN}✅ Auth key successfully stored.${NC}"
-
-# Download Tailscale (prefer wget, fallback to curl)
-if command -v wget &> /dev/null; then
-    wget -O /tmp/tailscale.tgz "https://pkgs.tailscale.com/stable/tailscale_${TAILSCALE_VERSION}_arm64.tgz"
-elif command -v curl &> /dev/null; then
-    curl -L -o /tmp/tailscale.tgz "https://pkgs.tailscale.com/stable/tailscale_${TAILSCALE_VERSION}_arm64.tgz"
-else
-    echo -e "${RED}ERROR: Neither wget nor curl are installed. Cannot download Tailscale.${NC}"
-    exit 1
-fi
-
-if [ $? -ne 0 ]; then
-    echo -e "${RED}ERROR: Failed to download Tailscale. Exiting.${NC}"
-    exit 1
-fi
-
-# Extract Tailscale
-tar -xf /tmp/tailscale.tgz -C /tmp
-if [ $? -ne 0 ]; then
-    echo -e "${RED}ERROR: Failed to extract Tailscale. Exiting.${NC}"
-    exit 1
-fi
-rm /tmp/tailscale.tgz
-
-# Move Tailscale binaries (to /userdata/system/tailscale/bin)
-mv /tmp/tailscale_*_arm64/tailscale /tmp/tailscale_*_arm64/tailscaled /userdata/system/tailscale/bin/
-rm -rf /tmp/tailscale_*_arm64  # Clean up the extracted directory
-
-# --- Ensure 'tun' Module is Loaded at Boot ---
-#     Add 'tun' to batocera-boot.conf
-if ! grep -q '^modules-load=tun$' /boot/batocera-boot.conf; then
-  echo -e "${YELLOW}➕ Adding 'tun' module to batocera-boot.conf for persistent loading...${NC}"
-  mount -o remount,rw /boot  # Make the /boot filesystem writable
-  echo 'modules-load=tun' >> /boot/batocera-boot.conf
-  mount -o remount,ro /boot  # Remount as read-only
-fi
+# --- Install Dependencies & Prepare System ---
+echo ">>> Loading TUN module..."
 modprobe tun
-
-# Enable IP forwarding (check before adding to avoid duplicates)
-if ! grep -q "net.ipv4.ip_forward = 1" /etc/sysctl.conf; then
-    echo 'net.ipv4.ip_forward = 1' | tee -a /etc/sysctl.conf
+mkdir -p /dev/net
+if [ ! -c /dev/net/tun ]; then
+    echo "Creating TUN device..."
+    mknod /dev/net/tun c 10 200
+    chmod 600 /dev/net/tun
 fi
-if ! grep -q "net.ipv6.conf.all.forwarding = 1" /etc/sysctl.conf; then
-    echo 'net.ipv6.conf.all.forwarding = 1' | tee -a /etc/sysctl.conf
-fi
-sysctl -p
 
-# --- Startup (custom.sh) ---
-# Use a temporary file to avoid issues with quotes and variable expansion.
-rm -f /tmp/tailscale_custom.sh #Remove any left over temp file.
-cat <<EOF > /tmp/tailscale_custom.sh
+echo ">>> Enabling IPv4 forwarding..."
+sysctl -w net.ipv4.ip_forward=1
+echo "net.ipv4.ip_forward = 1" >> /etc/sysctl.conf
+
+# --- Detect Subnet Automatically ---
+SUBNET=$(ip route | awk '/default/ {print $3}' | awk -F. '{print $1"."$2"."$3".0/24"}')
+echo "Detected subnet: $SUBNET"
+
+# --- Download & Install Tailscale ---
+echo ">>> Downloading Tailscale $TAILSCALE_VERSION for ARM64..."
+mkdir -p "$BIN_DIR"
+wget -O /tmp/tailscale.tgz "https://pkgs.tailscale.com/stable/tailscale_${TAILSCALE_VERSION}_arm64.tgz"
+tar -xzf /tmp/tailscale.tgz -C /tmp
+mv /tmp/tailscale_*_arm64/tailscale /tmp/tailscale_*_arm64/tailscaled "$BIN_DIR"
+chmod +x "$BIN_DIR/tailscale" "$BIN_DIR/tailscaled"
+rm -rf /tmp/tailscale_*
+
+# --- Store Auth Key ---
+echo "$AUTH_KEY" > "$INSTALL_DIR/authkey"
+chmod 600 "$INSTALL_DIR/authkey"
+
+# --- Create Startup Script (/userdata/system/custom.sh) ---
+echo ">>> Creating startup script..."
+cat <<EOF > "$CUSTOM_SCRIPT"
 #!/bin/sh
-if ! pgrep -f "/userdata/system/tailscale/bin/tailscaled" > /dev/null; then
-  /userdata/system/tailscale/bin/tailscaled --state=/userdata/system/tailscale/tailscaled.state &
-  sleep 10
-  # Restore authkey if missing
-  if [ ! -f /userdata/system/tailscale/authkey ]; then
-    cp /userdata/system/tailscale/authkey.bak /userdata/system/tailscale/authkey
-  fi
-  export TS_AUTHKEY=$(cat /userdata/system/tailscale/authkey)
-  /userdata/system/tailscale/bin/tailscale up --advertise-routes=$SUBNET --snat-subnet-routes=false --accept-routes --authkey=\$TS_AUTHKEY --hostname=batocera-1 --advertise-tags=tag:ssh-batocera-1 >> /userdata/system/tailscale/tailscale_up.log 2>&1
-    if [ $? -ne 0 ]; then
-      echo "Tailscale failed to start. Check log file." >> /userdata/system/tailscale/tailscale_up.log
-      cat /userdata/system/tailscale/tailscale_up.log
-      exit 1
-    fi
+if ! pgrep -f "$BIN_DIR/tailscaled" > /dev/null; then
+  "$BIN_DIR/tailscaled" --state=$STATE_DIR &  
+  sleep 10  
+  "$BIN_DIR/tailscale" up --advertise-routes=$SUBNET --authkey=\$(cat $INSTALL_DIR/authkey) --hostname=batocera-1 --advertise-tags=tag:ssh-batocera-1
 fi
 EOF
-chmod +x /tmp/tailscale_custom.sh
-mv /tmp/tailscale_custom.sh /userdata/system/custom.sh
-/bin/bash /userdata/system/custom.sh
+chmod +x "$CUSTOM_SCRIPT"
 
-# --- Verification and Prompt Before Reboot ---
-echo -e "${GREEN}------------------------------------------------------------------------${NC}"
-echo -e "${GREEN}Tailscale installation completed.  Performing verification checks...${NC}"
-echo -e "${GREEN}------------------------------------------------------------------------${NC}"
+# --- Start Tailscale Immediately ---
+echo ">>> Starting Tailscale now..."
+"$BIN_DIR/tailscaled" --state=$STATE_DIR &
+sleep 10
+"$BIN_DIR/tailscale" up --advertise-routes=$SUBNET --authkey="$AUTH_KEY" --hostname=batocera-1 --advertise-tags=tag:ssh-batocera-1
 
-# Check Tailscale Status (Give it a few seconds to start)
-echo -e "${YELLOW}Waiting for Tailscale to start...${NC}"
-for i in {1..30}; do
-    if /userdata/system/tailscale/bin/tailscale status &>/dev/null; then
-        echo -e "${GREEN}✅ Tailscale is running!${NC}"
-        break
-    fi
-    sleep 2
-done
-/userdata/system/tailscale/bin/tailscale status
-TAILSCALE_STATUS_EXIT_CODE=$?
-
-# Check for tailscale0 interface
-ip a | grep tailscale0
-IP_A_EXIT_CODE=$?
-
-echo -e "${GREEN}------------------------------------------------------------------------${NC}"
-if [ "$TAILSCALE_STATUS_EXIT_CODE" -ne 0 ] || [ "$IP_A_EXIT_CODE" -ne 0 ]; then
-    echo -e "${RED}ERROR: Tailscale verification failed.  Check the output above for errors.${NC}"
-    echo -e "${RED}       Do NOT save the overlay or reboot until this is resolved.${NC}"
-    echo -e "${RED}       You may need to run the tailscale up command manually.${NC}"
-    exit 1
+# --- Check if Tailscale Started Successfully ---
+sleep 5
+if "$BIN_DIR/tailscale" status | grep -q "online"; then
+    echo "✅ Tailscale is running successfully!"
 else
-    echo -e "${GREEN}Tailscale appears to be running correctly.${NC}"
-    echo ""
-    # Fetch the Tailscale IP automatically
-    TAILSCALE_IP=$(/userdata/system/tailscale/bin/tailscale ip -4)
-    if [[ -z "$TAILSCALE_IP" ]]; then
-        echo -e "${RED}ERROR: Could not retrieve Tailscale IP. Check 'tailscale status'.${NC}"
-        exit 1
-    fi
-    echo -e "${GREEN}Your Tailscale IP is: $TAILSCALE_IP${NC}"
-    echo -e "${YELLOW}IMPORTANT: Try connecting via Tailscale SSH *NOW*, before saving the overlay.${NC}"
-    echo -e "${YELLOW}Run this command from another device on your Tailscale network:${NC}"
-    echo ""
-    echo -e "${YELLOW}    ssh root@$TAILSCALE_IP${NC}"
-    echo ""
-    while true; do
-        read -r -p "Did Tailscale SSH work correctly? (yes/retry/no): " SSH_WORKED
-        if [[ "$SSH_WORKED" == "yes" ]]; then
-            break
-        elif [[ "$SSH_WORKED" == "retry" ]]; then
-            echo "Retrying SSH check..."
-            /userdata/system/tailscale/bin/tailscale status
-        else
-            echo -e "${RED}ERROR: Tailscale SSH did not work. Do NOT save the overlay or reboot.${NC}"
-            exit 1
-        fi
-    done
+    echo "❌ ERROR: Tailscale did not start correctly. Check logs."
+    exit 1
+fi
 
-    echo -e "${GREEN}-------------------------------------------------------------------------${NC}"
-    echo -e "${GREEN}Tailscale and SSH verification successful! It is now safe to save changes.${NC}"
-    read -r -p "Do you want to save changes and reboot? THIS IS IRREVERSIBLE (yes/no) " SAVE_CHANGES
+# --- Save Changes & Prompt for Reboot ---
+echo ">>> Saving changes to Batocera overlay..."
+batocera-save-overlay
 
-    if [[ "$SAVE_CHANGES" == "yes" ]]; then
-        #Remove potentially conflicting iptables rules.
-        iptables-save | grep -v "100.64.0.0/10" | iptables-restore
-        iptables-save > /userdata/system/iptables.rules
-        cat <<EOF > /userdata/system/services/iptablesload.sh
-#!/bin/bash
-iptables-restore < /userdata/system/iptables.rules
-EOF
-        chmod +x /userdata/system/services/iptablesload.sh
-        batocera-services enable iptablesload
-
-        echo ""
-        echo -e "${YELLOW}💾 Saving overlay...${NC}"
-        batocera-save-overlay
-        echo -e "${GREEN}✅ Overlay saved successfully.${NC}"
-        echo -e "${GREEN}♻️ Rebooting in 10 seconds...${NC}"
-        sleep 10
-        reboot
-    else
-       echo "Changes not saved. Exiting without rebooting."
-       exit 1
-    fi
+echo "🎉 Setup complete!"
+echo "You can now SSH into this device using your Tailscale IP."
+echo "Run this command from another device:"
+echo "   ssh root@$( "$BIN_DIR/tailscale" ip -4 )"
+echo ""
+read -r -p "Reboot now to apply all changes? (yes/no): " REBOOT
+if [[ "$REBOOT" == "yes" ]]; then
+    echo "Rebooting in 5 seconds..."
+    sleep 5
+    reboot
+else
+    echo "You must reboot manually to complete setup."
 fi
