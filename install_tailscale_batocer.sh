@@ -11,18 +11,22 @@ NC='\033[0m' # No Color
 
 # --- Prompt for Tailscale Auth Key ---
 # --- Prompt for Tailscale Auth Key ---
+# --- Prompt for Tailscale Auth Key ---
 if [[ -z "$1" ]]; then
     echo -e "${YELLOW}>>> Please provide your Tailscale auth key (from https://tailscale.com/login)${NC}"
     read -r -p "Auth Key: " AUTH_KEY
-    AUTH_KEY=$(echo "$AUTH_KEY" | tr -d '[:space:]')  # Remove any accidental spaces/newlines
+    AUTH_KEY=$(echo "$AUTH_KEY" | tr -d '[:space:]')  # Trim spaces and newlines
 else
     AUTH_KEY="$1"
 fi
 
-if [[ -z "$AUTH_KEY" ]] || ! echo "$AUTH_KEY" | grep -q '^tskey-auth-'; then
+# Ensure the auth key is valid
+if [[ -z "$AUTH_KEY" ]] || [[ ! "$AUTH_KEY" =~ ^tskey-auth-[a-zA-Z0-9-]+$ ]]; then
     echo -e "${RED}❌ ERROR: Invalid or missing auth key.${NC}"
     exit 1
 fi
+
+echo -e "${GREEN}✅ Auth key successfully captured!${NC}"
 
 # --- Detect Local Subnet ---
 GATEWAY_IP=$(ip route show default | awk '/default/ {print $3}')
