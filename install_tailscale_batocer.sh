@@ -1,111 +1,145 @@
 #!/bin/bash
+# Tailscale installer for Batocera
+# This script downloads Tailscale, sets up auto-start, and configures routing.
 
-# --- Configuration ---
-AUTH_KEY=""  # Replace with your actual AUTH KEY or leave blank
-TAILSCALE_VERSION="1.80.2"  # UPDATE IF NEEDED
+set -e  # exit on error
 
-# --- Colors for output ---
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-NC='\033[0m' # No Color
+echo ">>> Loading tun module..."
+modprobe tun || true  # Load TUN driver (ignore if already built-in or loaded)
 
-LOG_FILE="/userdata/system/tailscale/tailscale_install.log"
+echo ">>> Enabling IPv4 forwarding..."
+# Enable IP forwarding now and persist via custom.sh
+sysctl -w net.ipv4.ip_forward=1
 
-echo "Starting installation..." | tee -a $LOG_FILE
+# Determine system architecture for Tailscale download
+ARCH=$(uname -m)
+case "$ARCH" in
+    x86_64)   ARCH="amd64"   ;;  # 64-bit x86
+    i?86)     ARCH="386"     ;;  # 32-bit x86 (IA-32)
+    armv7*)   ARCH="arm"     ;;  # 32-bit ARM
+    armv6*)   ARCH="arm"     ;;  # 32-bit ARM (older)
+    aarch64)  ARCH="arm64"   ;;  # 64-bit ARM
+    *) 
+        echo "Unsupported architecture: $ARCH"
+        exit 1 
+        ;;
+esac
 
-# --- Ensure 'tun' module is loaded ---
-mkdir -p /dev/net
-if [ ! -c /dev/net/tun ]; then
-    echo "Creating TUN device..." | tee -a $LOG_FILE
-    mknod /dev/net/tun c 10 200
-    chmod 600 /dev/net/tun
-fi
-
-# Load tun module
-modprobe tun 2>/dev/null
-if ! lsmod | grep -q tun; then
-    echo -e "${RED}ERROR: Failed to load 'tun' module. Manual intervention required.${NC}" | tee -a $LOG_FILE
+# Download the latest stable Tailscale static binary for this arch
+VERSION="1.80.2"  # you can update this to the latest version if needed
+URL="https://pkgs.tailscale.com/stable/tailscale_${VERSION}_${ARCH}.tgz"
+echo ">>> Downloading Tailscale ${VERSION} for ${ARCH}..."
+if command -v curl >/dev/null 2>&1; then
+    curl -L -o /tmp/tailscale.tgz "$URL"
+elif command -v wget >/dev/null 2>&1; then
+    wget -O /tmp/tailscale.tgz "$URL"
+else
+    echo "Error: neither curl nor wget is available to fetch Tailscale."
     exit 1
 fi
 
-# --- Persist 'tun' module ---
-mount -o remount,rw /
-if ! grep -q '^tun$' /etc/modules; then
-    echo "Persisting 'tun' module to /etc/modules..." | tee -a $LOG_FILE
-    echo 'tun' >> /etc/modules
-fi
-mount -o remount,ro /
+echo ">>> Installing Tailscale binaries..."
+mkdir -p /userdata/tailscale
+tar xzf /tmp/tailscale.tgz -C /userdata/tailscale --strip-components=1
+chmod +x /userdata/tailscale/tailscale /userdata/tailscale/tailscaled
+rm -f /tmp/tailscale.tgz
 
-# --- Get Local Subnet ---
-GATEWAY_IP=$(ip route show default | awk '/default/ {print $3}')
-SUBNET=$(echo "$GATEWAY_IP" | awk -F. '{print $1"."$2"."$3".0/24"}')
-
-echo "Detected local subnet: $SUBNET" | tee -a $LOG_FILE
-read -r -p "Is this subnet correct? (yes/no): " SUBNET_CONFIRM
-if [[ "$SUBNET_CONFIRM" != "yes" ]]; then
-    read -r -p "Enter your local network subnet (e.g., 192.168.1.0/24): " SUBNET
+# Prompt for Tailscale auth key (required for headless setup)
+if [ -z "$TS_AUTH_KEY" ]; then
+    echo ">>> Please provide your Tailscale auth key (from https://tailscale.com/login)"
+    read -p "Auth key: " TS_AUTH_KEY
 fi
 
-# --- Get Auth Key ---
-if [[ -z "$AUTH_KEY" ]]; then
-    read -r -p "Enter your Tailscale auth key (tskey-auth-...): " AUTH_KEY
+# Optional: ask for hostname to use in Tailscale (or use default)
+read -p "Desired Tailscale device name (leave blank to use default hostname): " TS_HOSTNAME
+if [ -n "$TS_HOSTNAME" ]; then
+    HOSTNAME_FLAG="--hostname=${TS_HOSTNAME}"
+else
+    HOSTNAME_FLAG=""
 fi
-if [ -z "$AUTH_KEY" ] || ! echo "$AUTH_KEY" | grep -q '^tskey-auth-'; then
-    echo -e "${RED}Invalid or missing auth key. Exiting.${NC}" | tee -a $LOG_FILE
-    exit 1
+
+# Optional: ask if user wants to advertise their LAN or be an exit node
+ADVERTISE_FLAGS=""
+EXIT_FLAG=""
+# Determine local LAN subnet (if any) from default route (for advertise-routes)
+DEFAULT_IF=$(ip route | awk '/^default/ {print $5; exit}')
+if ip route show dev "$DEFAULT_IF" | grep -q "proto kernel"; then
+    LAN_SUBNET=$(ip route show dev "$DEFAULT_IF" proto kernel | awk '{print $1; exit}')
+else
+    LAN_SUBNET=""
+fi
+if [ -n "$LAN_SUBNET" ]; then
+    read -p "Advertise this device's LAN subnet $LAN_SUBNET to tailnet? [y/N]: " ADV
+    if [[ "$ADV" =~ ^[Yy] ]]; then
+        ADVERTISE_FLAGS="--advertise-routes=${LAN_SUBNET}"
+    fi
+fi
+read -p "Allow this device to act as an exit node (share internet)? [y/N]: " EX
+if [[ "$EX" =~ ^[Yy] ]]; then
+    EXIT_FLAG="--advertise-exit-node"
 fi
 
-# --- Install Tailscale ---
-mkdir -p /userdata/system/tailscale/bin
-wget -O /tmp/tailscale.tgz "https://pkgs.tailscale.com/stable/tailscale_${TAILSCALE_VERSION}_arm64.tgz"
-tar -xf /tmp/tailscale.tgz -C /tmp
-mv /tmp/tailscale_*_arm64/tailscale /tmp/tailscale_*_arm64/tailscaled /userdata/system/tailscale/bin/
-rm /tmp/tailscale.tgz
-
-# --- Store Auth Key ---
-echo "$AUTH_KEY" > /userdata/system/tailscale/authkey
-chmod 600 /userdata/system/tailscale/authkey
-
-# --- Startup Script ---
-cat <<EOF > /userdata/system/custom.sh
-#!/bin/sh
-if ! pgrep -f "/userdata/system/tailscale/bin/tailscaled" > /dev/null; then
-  /userdata/system/tailscale/bin/tailscaled --state=/userdata/system/tailscale &
-  sleep 10
-  /userdata/system/tailscale/bin/tailscale up --advertise-routes=$SUBNET --snat-subnet-routes=false --accept-routes --authkey=\$(cat /userdata/system/tailscale/authkey) --hostname=batocera-1 --advertise-tags=tag:ssh-batocera-1
+echo ">>> Writing startup script (/userdata/system/custom.sh)..."
+mkdir -p /userdata/system
+cat > /userdata/system/custom.sh <<EOF
+#!/bin/bash
+# Custom startup script for Batocera - Tailscale
+if [ "\$1" != "start" ]; then
+    exit 0
 fi
-EOF
-chmod +x /userdata/system/custom.sh
 
-# --- Start Tailscale ---
-/bin/bash /userdata/system/custom.sh
+# Load TUN module and enable IP forwarding
+modprobe tun || true
+sysctl -w net.ipv4.ip_forward=1
+
+# Wait for network connectivity (max 30s)
+for i in \$(seq 1 30); do
+    ping -c1 -W1 1.1.1.1 &>/dev/null && break
+    sleep 1
+done
+
+# Start Tailscale daemon
+/userdata/tailscale/tailscaled -state /userdata/tailscale/state \\
+    > /userdata/tailscale/tailscaled.log 2>&1 &
+
+# Give tailscaled a moment to initialize
 sleep 5
 
-# --- Verify Installation ---
-echo "Verifying Tailscale..." | tee -a $LOG_FILE
-if ! /userdata/system/tailscale/bin/tailscale status &>/dev/null; then
-    echo -e "${RED}ERROR: Tailscale did not start correctly. Exiting.${NC}" | tee -a $LOG_FILE
-    exit 1
+# Bring up tailscale interface (without auth key, uses stored state)
+/userdata/tailscale/tailscale up --accept-dns=false --accept-routes=false \\
+    $HOSTNAME_FLAG $ADVERTISE_FLAGS $EXIT_FLAG
+
+# Configure iptables for Tailscale routing
+iptables -t nat -A POSTROUTING -o tailscale0 -j MASQUERADE
+iptables -A FORWARD -i tailscale0 -m state --state RELATED,ESTABLISHED -j ACCEPT
+iptables -A FORWARD -o tailscale0 -j ACCEPT
+EOF
+
+# If exit node was chosen, add MASQUERADE rule for internet traffic
+if [[ "$EXIT_FLAG" == "--advertise-exit-node" && -n "$DEFAULT_IF" ]]; then
+    echo "iptables -t nat -A POSTROUTING -o $DEFAULT_IF -s 100.64.0.0/10 -j MASQUERADE" >> /userdata/system/custom.sh
+    echo "# (Forwarding rules above already cover exit-node traffic routing)" >> /userdata/system/custom.sh
 fi
 
-# Get Tailscale IP
-TAILSCALE_IP=$(/userdata/system/tailscale/bin/tailscale ip -4)
-echo "Your Tailscale IP: $TAILSCALE_IP" | tee -a $LOG_FILE
+chmod +x /userdata/system/custom.sh
 
-# Prompt user to verify SSH
-echo "Try SSHing: ssh root@$TAILSCALE_IP" | tee -a $LOG_FILE
-read -r -p "Did SSH work? (yes/no): " SSH_WORKED
-if [[ "$SSH_WORKED" != "yes" ]]; then
-    echo -e "${RED}ERROR: Tailscale SSH did not work. Exiting.${NC}" | tee -a $LOG_FILE
-    exit 1
+echo ">>> Starting Tailscale and logging in with auth key..."
+# Start tailscaled now (in background) and perform initial login using the auth key
+/userdata/tailscale/tailscaled -state /userdata/tailscale/state > /userdata/tailscale/tailscaled.log 2>&1 &
+sleep 5
+/userdata/tailscale/tailscale up --accept-dns=false --accept-routes=false $HOSTNAME_FLAG $ADVERTISE_FLAGS $EXIT_FLAG --auth-key $TS_AUTH_KEY
+
+# Apply iptables rules now (so changes take effect immediately without reboot)
+echo ">>> Applying iptables rules..."
+iptables -t nat -A POSTROUTING -o tailscale0 -j MASQUERADE
+iptables -A FORWARD -i tailscale0 -m state --state RELATED,ESTABLISHED -j ACCEPT
+iptables -A FORWARD -o tailscale0 -j ACCEPT
+if [[ "$EXIT_FLAG" == "--advertise-exit-node" && -n "$DEFAULT_IF" ]]; then
+    iptables -t nat -A POSTROUTING -o "$DEFAULT_IF" -s 100.64.0.0/10 -j MASQUERADE
 fi
 
-# --- Save Overlay & Reboot ---
-read -r -p "Do you want to save and reboot? (yes/no): " SAVE_CHANGES
-if [[ "$SAVE_CHANGES" == "yes" ]]; then
-    batocera-save-overlay
-    echo "Rebooting in 10 seconds..." | tee -a $LOG_FILE
-    sleep 10
-    reboot
-fi
+echo ">>> Tailscale should be up and running. Verifying status..."
+/userdata/tailscale/tailscale status || echo "(If status fails, check logs at /userdata/tailscale/tailscaled.log)"
+
+echo ">>> Installation complete. Tailscale is now configured to start on boot."
+echo ">>> You can reboot the system now to test that everything comes up automatically."
