@@ -10,9 +10,11 @@ YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
 # --- Prompt for Tailscale Auth Key ---
+# --- Prompt for Tailscale Auth Key ---
 if [[ -z "$1" ]]; then
     echo -e "${YELLOW}>>> Please provide your Tailscale auth key (from https://tailscale.com/login)${NC}"
     read -r -p "Auth Key: " AUTH_KEY
+    AUTH_KEY=$(echo "$AUTH_KEY" | tr -d '[:space:]')  # Remove any accidental spaces/newlines
 else
     AUTH_KEY="$1"
 fi
