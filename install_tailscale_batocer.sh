@@ -1,5 +1,5 @@
 #!/bin/bash
-# Version: 1.0.7 - March 2, 2025
+# Version: 1.0.8 - March 2, 2025
 
 # --- Configuration ---
 AUTH_KEY="${1:-}"  # Use $1 if provided, otherwise prompt
@@ -76,7 +76,7 @@ if [[ -z "$AUTH_KEY" ]]; then
     echo "   Go to: https://login.tailscale.com/admin/settings/keys"
     echo "   - Reusable: ENABLED"
     echo "   - Ephemeral: ENABLED"
-    echo "   - Optional Tags: tag:ssh-$HOSTNAME (if used, must match key settings)"
+    echo "   - Tags: tag:ssh-$HOSTNAME (required if key uses tags)"
     read -r -p "Enter your Tailscale auth key (tskey-auth-...): " AUTH_KEY
 fi
 if [ -z "$AUTH_KEY" ] || ! echo "$AUTH_KEY" | grep -q '^tskey-auth-'; then
@@ -157,7 +157,7 @@ if ! pgrep -f "/userdata/system/tailscale/bin/tailscaled" > /dev/null; then
         cp /userdata/system/tailscale/authkey.bak /userdata/system/tailscale/authkey
     fi
     export TS_AUTHKEY=\$(cat /userdata/system/tailscale/authkey)
-    /userdata/system/tailscale/bin/tailscale up --advertise-routes=$SUBNET --snat-subnet-routes=false --accept-routes --authkey="\$TS_AUTHKEY" --hostname="$HOSTNAME" >> /userdata/system/tailscale/tailscale_up.log 2>&1
+    /userdata/system/tailscale/bin/tailscale up --advertise-routes=$SUBNET --snat-subnet-routes=false --accept-routes --authkey="\$TS_AUTHKEY" --hostname="$HOSTNAME" --advertise-tags=tag:ssh-$HOSTNAME >> /userdata/system/tailscale/tailscale_up.log 2>&1
     if [ \$? -ne 0 ]; then
         echo "Tailscale failed to start at \$(date). Check log file." >> /userdata/system/tailscale/tailscale_up.log
         cat /userdata/system/tailscale/tailscale_up.log >> /userdata/system/tailscale/boot.log
