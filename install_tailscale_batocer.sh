@@ -60,10 +60,10 @@ echo -e "${GREEN}✅ Using hostname: $HOSTNAME${NC}"
 # --- Auth Key ---
 if [[ -z "$AUTH_KEY" ]]; then
     echo -e "${YELLOW}🔑 Generate a REUSABLE auth key:${NC}"
-    echo "   https://login.tailscale.com/admin/settings/keys"
-    echo "   - Reusable: ENABLED (required)"
-    echo "   - Ephemeral: Optional"
-    echo "   - Tags: tag:ssh-batocera-1"
+    echo "    https://login.tailscale.com/admin/settings/keys"
+    echo "    - Reusable: ENABLED (required)"
+    echo "    - Ephemeral: Optional"
+    echo "    - Tags: tag:ssh-batocera-1"
     read -r -p "Enter auth key (tskey-auth-...): " AUTH_KEY
 fi
 if [ -z "$AUTH_KEY" ] || ! echo "$AUTH_KEY" | grep -q '^tskey-auth-'; then
@@ -122,16 +122,12 @@ iptables-save | grep -v "100.64.0.0/10" | iptables-restore
 iptables -A INPUT -p tcp --dport 22 -j ACCEPT
 iptables-save > /userdata/system/iptables.rules
 mkdir -p /userdata/system/services
-cat <<EOF > /userdata/system/services/iptablesload.sh
+cat <<EOF > /userdata/system/services/iptablesload
 #!/bin/bash
 iptables-restore < /userdata/system/iptables.rules
 EOF
-chmod +x /userdata/system/services/iptablesload.sh
-if command -v batocera-services &> /dev/null; then
-    batocera-services enable iptablesload
-else
-    echo -e "${YELLOW}WARNING: batocera-services not found; iptables may not persist.${NC}"
-fi
+chmod +x /userdata/system/services/iptablesload
+batocera-services enable iptablesload
 
 # --- Startup Script ---
 echo -e "${YELLOW}Configuring autostart...${NC}"
@@ -144,35 +140,35 @@ chmod 600 /dev/net/tun
 modprobe tun
 sleep 20  # Wait 20 seconds for TUN to fully load
 if ! pgrep -f "/userdata/system/tailscale/bin/tailscaled" > /dev/null; then
-    echo "Starting tailscaled at \$(date)" >> \$LOG
+    echo "Starting tailscaled at $(date)" >> \$LOG
     /userdata/system/tailscale/bin/tailscaled --state=/userdata/system/tailscale/tailscaled.state >> \$LOG 2>&1 &
     sleep 15
     if [ ! -f /userdata/system/tailscale/authkey ]; then
         cp /userdata/system/tailscale/authkey.bak /userdata/system/tailscale/authkey
     fi
-    /userdata/system/tailscale/bin/tailscale up \\
-        --advertise-routes=$SUBNET \\
-        --snat-subnet-routes=false \\
-        --accept-routes \\
-        --authkey="\$(cat /userdata/system/tailscale/authkey)" \\
-        --hostname="$HOSTNAME" \\
+    /userdata/system/tailscale/bin/tailscale up \
+        --advertise-routes=$SUBNET \
+        --snat-subnet-routes=false \
+        --accept-routes \
+        --authkey="\$(cat /userdata/system/tailscale/authkey)" \
+        --hostname="$HOSTNAME" \
         --advertise-tags=tag:ssh-batocera-1 >> \$LOG 2>&1
     if [ \$? -ne 0 ]; then
-        echo "First tailscale up failed. Retrying at \$(date)" >> \$LOG
+        echo "First tailscale up failed. Retrying at $(date)" >> \$LOG
         sleep 5
-        /userdata/system/tailscale/bin/tailscale up --reset \\
-            --advertise-routes=$SUBNET \\
-            --snat-subnet-routes=false \\
-            --accept-routes \\
-            --authkey="\$(cat /userdata/system/tailscale/authkey)" \\
-            --hostname="$HOSTNAME" \\
+        /userdata/system/tailscale/bin/tailscale up --reset \
+            --advertise-routes=$SUBNET \
+            --snat-subnet-routes=false \
+            --accept-routes \
+            --authkey="\$(cat /userdata/system/tailscale/authkey)" \
+            --hostname="$HOSTNAME" \
             --advertise-tags=tag:ssh-batocera-1 >> \$LOG 2>&1
         if [ \$? -ne 0 ]; then
-            echo "Tailscale failed again at \$(date). Check key validity." >> \$LOG
+            echo "Tailscale failed again at $(date). Check key validity." >> \$LOG
             exit 1
         fi
     fi
-    echo "Tailscale started successfully at \$(date)" >> \$LOG
+    echo "Tailscale started successfully at $(date)" >> \$LOG
 fi
 EOF
 chmod +x /userdata/system/custom.sh
