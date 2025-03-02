@@ -2,7 +2,7 @@
 # Version: 1.0.2 - March 2, 2025
 
 # --- Configuration ---
-AUTH_KEY="${1:-}"  # Use $1 (first argument) if provided, otherwise prompt
+AUTH_KEY="${1:-}"  # Use $1 if provided, otherwise prompt
 TAILSCALE_VERSION="${2:-1.80.2}"  # Use $2 if provided, otherwise default
 
 # --- Colors for output ---
