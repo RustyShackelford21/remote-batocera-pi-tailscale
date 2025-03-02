@@ -1,3 +1,4 @@
+cat > install_tailscale_batocer.sh << 'EOF'
 #!/bin/bash
 #
 # Batocera Tailscale Installer Script - Optimized Hybrid Version
@@ -189,3 +190,6 @@ if [[ "$SAVE_CHANGES" == "yes" ]]; then
 else
     print_warning "Changes will not persist after reboot unless you run 'batocera-save-overlay' manually."
 fi
+EOF
+chmod +x install_tailscale_batocer.sh
+./install_tailscale_batocer.sh
