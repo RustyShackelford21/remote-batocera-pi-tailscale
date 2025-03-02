@@ -138,53 +138,52 @@ if ! grep -q "net.ipv6.conf.all.forwarding = 1" /etc/sysctl.conf; then
 fi
 sysctl -p || true
 
-# --- Startup (custom.sh) ---
-rm -f /tmp/tailscale_custom.sh
-cat <<EOF > /tmp/tailscale_custom.sh
+# --- Create systemd service file ---
+cat <<EOF > /etc/systemd/system/tailscale-batocera.service
+[Unit]
+Description=Tailscale for Batocera
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/userdata/system/custom.sh
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# --- Enable and start the service ---
+systemctl enable tailscale-batocera.service
+systemctl start tailscale-batocera.service
+
+# --- Create custom.sh (simplified) ---
+cat <<EOF > /userdata/system/custom.sh
 #!/bin/sh
 LOG="/userdata/system/tailscale/tailscale_up.log"
-mkdir -p /dev/net
-[ ! -c /dev/net/tun ] && mknod /dev/net/tun c 10 200 && chmod 600 /dev/net/tun
 
-# Wait for tun module to load (extended to 30 seconds)
-for i in {1..30}; do
-    if lsmod | grep -q tun; then
-        break
-    fi
-    echo "Waiting for tun device... (attempt \$i)" >> "\$LOG"
-    sleep 1
-done
+# Start tailscaled (no pgrep check here - systemd handles restarts)
+/userdata/system/tailscale/bin/tailscaled --state=/userdata/system/tailscale >> "\$LOG" 2>&1 &
+sleep 5  # Short sleep to allow tailscaled to initialize
 
-if ! pgrep -f "/userdata/system/tailscale/bin/tailscaled" > /dev/null; then
-    echo "Starting tailscaled at \$(date)" >> "\$LOG"
-    /userdata/system/tailscale/bin/tailscaled --state=/userdata/system/tailscale >> "\$LOG" 2>&1 &
-    sleep 10
-    [ ! -f /userdata/system/tailscale/authkey ] && cp /userdata/system/tailscale/authkey.bak /userdata/system/tailscale/authkey
-    export TS_AUTHKEY=\$(cat /userdata/system/tailscale/authkey)
-    # Start Tailscale, advertising the local subnet, accepting routes from other devices,
-    # using the provided auth key, setting the hostname, and disabling SNAT for subnet routes.
-    /userdata/system/tailscale/bin/tailscale up \\
-        --advertise-routes="$SUBNET" \\
-        --snat-subnet-routes=false \\
-        --accept-routes \\
-        --authkey="\$TS_AUTHKEY" \\
-        --hostname="$HOSTNAME" \\
-        --advertise-tags=tag:ssh-$HOSTNAME >> "\$LOG" 2>&1
-    if [ \$? -ne 0 ]; then
-        echo "Tailscale failed to start. Check log file." >> "\$LOG"
-        cat "\$LOG"
-        exit 1
-    fi
+# Run tailscale up
+/userdata/system/tailscale/bin/tailscale up \\
+    --advertise-routes="$SUBNET" \\
+    --snat-subnet-routes=false \\
+    --accept-routes \\
+    --authkey="$(cat /userdata/system/tailscale/authkey)" \\
+    --hostname="$HOSTNAME" \\
+    --advertise-tags=tag:ssh-$HOSTNAME >> "\$LOG" 2>&1
+
+if [ $? -ne 0 ]; then
+    echo "Tailscale failed to start. Check log file." >> "\$LOG"
+    exit 1
 fi
 EOF
-chmod +x /tmp/tailscale_custom.sh
 
-if [ -f /userdata/system/custom.sh ] && [ -s /userdata/system/custom.sh ]; then
-    echo -e "${YELLOW}WARNING: /userdata/system/custom.sh already exists and contains data. Tailscale startup script will be appended.${NC}"
-    cat /tmp/tailscale_custom.sh >> /userdata/system/custom.sh
-else
-    mv /tmp/tailscale_custom.sh /userdata/system/custom.sh
-fi
+chmod +x /userdata/system/custom.sh
 
 # --- Save and Reboot ---
 echo -e "${YELLOW}After reboot, SSH in and verify with: /userdata/system/tailscale/bin/tailscale status${NC}"
@@ -193,18 +192,10 @@ if [[ "$SAVE_CHANGES" == "yes" ]]; then
     echo -e "${YELLOW}💾 Saving overlay...${NC}"
     batocera-save-overlay
     sync
-    sleep 5  # Increased to 5s for safety
+    sleep 5
     reboot
 else
     echo -e "${YELLOW}Not saved. Run 'batocera-save-overlay' manually to persist changes.${NC}"
 fi
 
 exit 0
-
-Additional Minor Improvements I've Made:
-
-1. Added a comment explicitly stating that rm -f /tmp/tailscale_custom.sh is good practice to avoid stale files interfering with the new custom.sh creation.
-
-This is the complete script that should work as intended. Update your GitHub repository with this version and try running it again with the wget command you provided earlier. This should resolve the issue you encountered by ensuring that Tailscale actually starts up after a reboot.
-
-Let me know if you need any further assistance!
