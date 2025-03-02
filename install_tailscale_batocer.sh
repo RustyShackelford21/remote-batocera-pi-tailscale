@@ -1,5 +1,5 @@
 #!/bin/bash
-# Version: 1.0.2 - March 2, 2025
+# Version: 1.0.3 - March 2, 2025
 
 # --- Configuration ---
 AUTH_KEY="${1:-}"  # Use $1 if provided, otherwise prompt
@@ -43,7 +43,7 @@ if [ -z "$CONFIRM_INSTALL" ] || [ "$CONFIRM_INSTALL" != "yes" ]; then
     fi
 fi
 
-# --- Automatic Subnet Detection ---
+# --- Automatic Subnet Detection (Initial Setup) ---
 GATEWAY_IP=$(ip route show default | awk '/default/ {print $3}')
 if [[ -z "$GATEWAY_IP" ]]; then
     echo -e "${YELLOW}WARNING: Could not automatically determine your local network subnet.${NC}"
@@ -136,6 +136,14 @@ cat <<EOF > /tmp/tailscale_custom.sh
 # Ensure /run/tailscale directory exists (Batocera cleans /run on boot)
 mkdir -p /run/tailscale
 
+# Dynamically detect subnet on each boot
+GATEWAY_IP=\$(ip route show default | awk '/default/ {print \$3}')
+if [[ -z "\$GATEWAY_IP" ]]; then
+    SUBNET="192.168.1.0/24"  # Fallback default if detection fails
+else
+    SUBNET=\$(echo "\$GATEWAY_IP" | awk -F. '{print \$1"."\$2"."\$3".0/24"}')
+fi
+
 if ! pgrep -f "/userdata/system/tailscale/bin/tailscaled" > /dev/null; then
     /userdata/system/tailscale/bin/tailscaled --state=/userdata/system/tailscale/tailscaled.state --socket=/run/tailscale/tailscaled.sock &
     sleep 10  # Give it time to initialize
@@ -144,7 +152,7 @@ if ! pgrep -f "/userdata/system/tailscale/bin/tailscaled" > /dev/null; then
         cp /userdata/system/tailscale/authkey.bak /userdata/system/tailscale/authkey
     fi
     export TS_AUTHKEY=\$(cat /userdata/system/tailscale/authkey)
-    /userdata/system/tailscale/bin/tailscale up --advertise-routes=$SUBNET --snat-subnet-routes=false --accept-routes --authkey="\$TS_AUTHKEY" --hostname="$HOSTNAME" --advertise-tags=tag:ssh-$HOSTNAME >> /userdata/system/tailscale/tailscale_up.log 2>&1
+    /userdata/system/tailscale/bin/tailscale up --advertise-routes=\$SUBNET --snat-subnet-routes=false --accept-routes --authkey="\$TS_AUTHKEY" --hostname="$HOSTNAME" --advertise-tags=tag:ssh-$HOSTNAME >> /userdata/system/tailscale/tailscale_up.log 2>&1
     if [ \$? -ne 0 ]; then
         echo "Tailscale failed to start. Check log file." >> /userdata/system/tailscale/tailscale_up.log
         cat /userdata/system/tailscale/tailscale_up.log
