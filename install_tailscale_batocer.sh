@@ -1,5 +1,5 @@
 #!/bin/bash
-# Version: 1.0.3 - March 2, 2025
+# Version: 1.0.4 - March 2, 2025
 
 # --- Configuration ---
 AUTH_KEY="${1:-}"  # Use $1 if provided, otherwise prompt
@@ -136,9 +136,10 @@ cat <<EOF > /tmp/tailscale_custom.sh
 #!/bin/sh
 # Ensure /run/tailscale directory exists (Batocera cleans /run on boot)
 mkdir -p /run/tailscale
+echo "Starting Tailscale at \$(date)" >> /userdata/system/tailscale/boot.log
 
 if ! pgrep -f "/userdata/system/tailscale/bin/tailscaled" > /dev/null; then
-    /userdata/system/tailscale/bin/tailscaled --state=/userdata/system/tailscale/tailscaled.state --socket=/run/tailscale/tailscaled.sock &
+    /userdata/system/tailscale/bin/tailscaled --state=/userdata/system/tailscale/tailscaled.state --socket=/run/tailscale/tailscaled.sock >> /userdata/system/tailscale/boot.log 2>&1 &
     sleep 10  # Give it time to initialize
     # Restore authkey if missing (shouldn't happen, but good to have)
     if [ ! -f /userdata/system/tailscale/authkey ]; then
@@ -147,8 +148,8 @@ if ! pgrep -f "/userdata/system/tailscale/bin/tailscaled" > /dev/null; then
     export TS_AUTHKEY=\$(cat /userdata/system/tailscale/authkey)
     /userdata/system/tailscale/bin/tailscale up --advertise-routes=$SUBNET --snat-subnet-routes=false --accept-routes --authkey="\$TS_AUTHKEY" --hostname="$HOSTNAME" --advertise-tags=tag:ssh-$HOSTNAME >> /userdata/system/tailscale/tailscale_up.log 2>&1
     if [ \$? -ne 0 ]; then
-        echo "Tailscale failed to start. Check log file." >> /userdata/system/tailscale/tailscale_up.log
-        cat /userdata/system/tailscale/tailscale_up.log
+        echo "Tailscale failed to start at \$(date). Check log file." >> /userdata/system/tailscale/tailscale_up.log
+        cat /userdata/system/tailscale/tailscale_up.log >> /userdata/system/tailscale/boot.log
         exit 1
     fi
 fi
@@ -156,36 +157,88 @@ EOF
 chmod +x /tmp/tailscale_custom.sh || { echo -e "${RED}ERROR: Failed to set custom.sh permissions.${NC}"; exit 1; }
 mv /tmp/tailscale_custom.sh /userdata/system/custom.sh || { echo -e "${RED}ERROR: Failed to move custom.sh.${NC}"; exit 1; }
 
-# --- Save and Reboot ---
-echo -e "${GREEN}------------------------------------------------------------------------${NC}"
-echo -e "${GREEN}Tailscale installation completed. Saving changes and rebooting...${NC}"
-echo -e "${GREEN}------------------------------------------------------------------------${NC}"
-echo -e "${YELLOW}After reboot, SSH back in and run:${NC}"
-echo -e "${YELLOW}    /userdata/system/tailscale/bin/tailscale status${NC}"
-echo -e "${YELLOW}If Tailscale is running, get your IP with:${NC}"
-echo -e "${YELLOW}    /userdata/system/tailscale/bin/tailscale ip -4${NC}"
-echo -e "${YELLOW}Then test SSH from another device:${NC}"
-echo -e "${YELLOW}    ssh root@<your-tailscale-ip>${NC}"
-echo -e "${YELLOW}Auto-saving and rebooting in 10 seconds (press Ctrl+C to cancel)...${NC}"
-sleep 10
+# --- Run Tailscale Now for Verification ---
+echo -e "${YELLOW}Starting Tailscale to verify installation...${NC}"
+/bin/bash /userdata/system/custom.sh &
 
-iptables-save | grep -v "100.64.0.0/10" | iptables-restore || { echo -e "${RED}ERROR: Failed to update iptables rules.${NC}"; exit 1; }
-iptables-save > /userdata/system/iptables.rules
-mkdir -p /userdata/system/services
-cat <<EOF > /userdata/system/services/iptablesload.sh
+# --- Verify Tailscale is Running ---
+echo -e "${GREEN}------------------------------------------------------------------------${NC}"
+echo -e "${GREEN}Verifying Tailscale installation...${NC}"
+echo -e "${GREEN}------------------------------------------------------------------------${NC}"
+echo -e "${YELLOW}Waiting for Tailscale to start (up to 30 seconds)...${NC}"
+for i in {1..15}; do
+    if /userdata/system/tailscale/bin/tailscale status &>/dev/null; then
+        echo -e "${GREEN}✅ Tailscale is running!${NC}"
+        break
+    fi
+    sleep 2
+done
+
+# Check status and interface
+/userdata/system/tailscale/bin/tailscale status
+TAILSCALE_STATUS_EXIT_CODE=$?
+ip a | grep tailscale0
+IP_A_EXIT_CODE=$?
+
+if [ "$TAILSCALE_STATUS_EXIT_CODE" -ne 0 ] || [ "$IP_A_EXIT_CODE" -ne 0 ]; then
+    echo -e "${RED}ERROR: Tailscale failed to start. Check logs:${NC}"
+    cat /userdata/system/tailscale/tailscale_up.log
+    cat /userdata/system/tailscale/boot.log
+    echo -e "${RED}Installation incomplete. Please troubleshoot.${NC}"
+    exit 1
+else
+    TAILSCALE_IP=$(/userdata/system/tailscale/bin/tailscale ip -4)
+    if [[ -z "$TAILSCALE_IP" ]]; then
+        echo -e "${RED}ERROR: Could not retrieve Tailscale IP. Check logs:${NC}"
+        cat /userdata/system/tailscale/tailscale_up.log
+        cat /userdata/system/tailscale/boot.log
+        exit 1
+    fi
+    echo -e "${GREEN}Tailscale is active with IP: $TAILSCALE_IP${NC}"
+    echo -e "${YELLOW}Test SSH now from another device on your Tailscale network:${NC}"
+    echo -e "${YELLOW}    ssh root@$TAILSCALE_IP${NC}"
+    while true; do
+        read -r -p "Did SSH work? (yes/no): " SSH_CONFIRM
+        if [[ "$SSH_CONFIRM" == "yes" ]]; then
+            break
+        elif [[ "$SSH_CONFIRM" == "no" ]]; then
+            echo -e "${RED}ERROR: SSH failed. Check Tailscale status and logs:${NC}"
+            /userdata/system/tailscale/bin/tailscale status
+            cat /userdata/system/tailscale/tailscale_up.log
+            cat /userdata/system/tailscale/boot.log
+            echo -e "${RED}Resolve issues before saving.${NC}"
+            exit 1
+        else
+            echo "Please enter 'yes' or 'no'."
+        fi
+    done
+
+    echo -e "${GREEN}------------------------------------------------------------------------${NC}"
+    echo -e "${GREEN}Tailscale installation and SSH verified!${NC}"
+    read -r -p "Save changes and reboot? THIS IS IRREVERSIBLE (yes/no): " SAVE_CHANGES
+    if [[ "$SAVE_CHANGES" == "yes" ]]; then
+        iptables-save | grep -v "100.64.0.0/10" | iptables-restore || { echo -e "${RED}ERROR: Failed to update iptables rules.${NC}"; exit 1; }
+        iptables-save > /userdata/system/iptables.rules
+        mkdir -p /userdata/system/services
+        cat <<EOF > /userdata/system/services/iptablesload.sh
 #!/bin/bash
 iptables-restore < /userdata/system/iptables.rules
 EOF
-chmod +x /userdata/system/services/iptablesload.sh
-if command -v batocera-services &> /dev/null; then
-    batocera-services enable iptablesload
-else
-    echo -e "${YELLOW}WARNING: batocera-services not found. iptables rules may not persist across reboots.${NC}"
-fi
+        chmod +x /userdata/system/services/iptablesload.sh
+        if command -v batocera-services &> /dev/null; then
+            batocera-services enable iptablesload
+        else
+            echo -e "${YELLOW}WARNING: batocera-services not found. iptables rules may not persist across reboots.${NC}"
+        fi
 
-echo ""
-echo -e "${YELLOW}💾 Saving overlay...${NC}"
-batocera-save-overlay || { echo -e "${RED}ERROR: Failed to save overlay.${NC}"; exit 1; }
-echo -e "${GREEN}✅ Overlay saved successfully.${NC}"
-echo -e "${GREEN}♻️ Rebooting now...${NC}"
-reboot
+        echo -e "${YELLOW}💾 Saving overlay...${NC}"
+        batocera-save-overlay || { echo -e "${RED}ERROR: Failed to save overlay.${NC}"; exit 1; }
+        echo -e "${GREEN}✅ Overlay saved successfully.${NC}"
+        echo -e "${GREEN}♻️ Rebooting now...${NC}"
+        reboot
+    else
+        echo -e "${YELLOW}Changes not saved. Exiting without rebooting.${NC}"
+        echo -e "${YELLOW}Run '/bin/bash /userdata/system/custom.sh' to restart Tailscale if needed.${NC}"
+        exit 0
+    fi
+fi
