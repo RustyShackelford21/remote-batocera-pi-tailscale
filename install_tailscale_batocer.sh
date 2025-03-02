@@ -92,6 +92,7 @@ rm -rf /tmp/tailscale_*_arm64 /tmp/tailscale.tgz
 chmod +x /userdata/system/tailscale/bin/*
 
 # --- TUN Device ---
+echo -e "${YELLOW}Configuring TUN device...${NC}"
 mkdir -p /dev/net
 if ! [ -c /dev/net/tun ]; then
     echo -e "${YELLOW}Creating TUN device...${NC}"
@@ -137,7 +138,11 @@ echo -e "${YELLOW}Configuring autostart...${NC}"
 cat <<EOF > /userdata/system/custom.sh
 #!/bin/sh
 LOG="/userdata/system/tailscale/tailscale.log"
-mkdir -p /run/tailscale
+mkdir -p /run/tailscale /dev/net
+[ -c /dev/net/tun ] || mknod /dev/net/tun c 10 200
+chmod 600 /dev/net/tun
+modprobe tun
+sleep 5  # Wait for TUN to fully load
 if ! pgrep -f "/userdata/system/tailscale/bin/tailscaled" > /dev/null; then
     echo "Starting tailscaled at \$(date)" >> \$LOG
     /userdata/system/tailscale/bin/tailscaled --state=/userdata/system/tailscale/tailscaled.state >> \$LOG 2>&1 &
@@ -171,6 +176,21 @@ if ! pgrep -f "/userdata/system/tailscale/bin/tailscaled" > /dev/null; then
 fi
 EOF
 chmod +x /userdata/system/custom.sh
+
+# --- Boot Hook ---
+echo -e "${YELLOW}Setting up boot hook...${NC}"
+cat <<EOF > /etc/init.d/S99tailscale
+#!/bin/sh
+case "\$1" in
+    start)
+        /bin/sh /userdata/system/custom.sh &
+        ;;
+    stop)
+        pkill -f tailscaled
+        ;;
+esac
+EOF
+chmod +x /etc/init.d/S99tailscale
 
 # --- Start and Verify ---
 echo -e "${GREEN}Starting Tailscale...${NC}"
