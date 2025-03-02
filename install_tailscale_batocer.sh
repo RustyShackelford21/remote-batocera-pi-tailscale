@@ -43,7 +43,7 @@ if [ -z "$CONFIRM_INSTALL" ] || [ "$CONFIRM_INSTALL" != "yes" ]; then
     fi
 fi
 
-# --- Automatic Subnet Detection (Initial Setup) ---
+# --- Automatic Subnet Detection ---
 GATEWAY_IP=$(ip route show default | awk '/default/ {print $3}')
 if [[ -z "$GATEWAY_IP" ]]; then
     echo -e "${YELLOW}WARNING: Could not automatically determine your local network subnet.${NC}"
@@ -52,6 +52,7 @@ if [[ -z "$GATEWAY_IP" ]]; then
 else
     SUBNET=$(echo "$GATEWAY_IP" | awk -F. '{print $1"."$2"."$3".0/24"}')
     echo -e "${GREEN}✅ Detected local subnet: $SUBNET${NC}"
+    echo -e "${YELLOW}Note: If another device (e.g., batocera-2) uses this subnet, only one can advertise it in Tailscale.${NC}"
     read -r -p "Is this subnet correct? (yes/no): " SUBNET_CONFIRM
     if [[ "$SUBNET_CONFIRM" != "yes" ]]; then
         read -r -p "Enter your local network subnet (e.g., 192.168.1.0/24): " SUBNET
@@ -136,14 +137,6 @@ cat <<EOF > /tmp/tailscale_custom.sh
 # Ensure /run/tailscale directory exists (Batocera cleans /run on boot)
 mkdir -p /run/tailscale
 
-# Dynamically detect subnet on each boot
-GATEWAY_IP=\$(ip route show default | awk '/default/ {print \$3}')
-if [[ -z "\$GATEWAY_IP" ]]; then
-    SUBNET="192.168.1.0/24"  # Fallback default if detection fails
-else
-    SUBNET=\$(echo "\$GATEWAY_IP" | awk -F. '{print \$1"."\$2"."\$3".0/24"}')
-fi
-
 if ! pgrep -f "/userdata/system/tailscale/bin/tailscaled" > /dev/null; then
     /userdata/system/tailscale/bin/tailscaled --state=/userdata/system/tailscale/tailscaled.state --socket=/run/tailscale/tailscaled.sock &
     sleep 10  # Give it time to initialize
@@ -152,7 +145,7 @@ if ! pgrep -f "/userdata/system/tailscale/bin/tailscaled" > /dev/null; then
         cp /userdata/system/tailscale/authkey.bak /userdata/system/tailscale/authkey
     fi
     export TS_AUTHKEY=\$(cat /userdata/system/tailscale/authkey)
-    /userdata/system/tailscale/bin/tailscale up --advertise-routes=\$SUBNET --snat-subnet-routes=false --accept-routes --authkey="\$TS_AUTHKEY" --hostname="$HOSTNAME" --advertise-tags=tag:ssh-$HOSTNAME >> /userdata/system/tailscale/tailscale_up.log 2>&1
+    /userdata/system/tailscale/bin/tailscale up --advertise-routes=$SUBNET --snat-subnet-routes=false --accept-routes --authkey="\$TS_AUTHKEY" --hostname="$HOSTNAME" --advertise-tags=tag:ssh-$HOSTNAME >> /userdata/system/tailscale/tailscale_up.log 2>&1
     if [ \$? -ne 0 ]; then
         echo "Tailscale failed to start. Check log file." >> /userdata/system/tailscale/tailscale_up.log
         cat /userdata/system/tailscale/tailscale_up.log
@@ -163,7 +156,7 @@ EOF
 chmod +x /tmp/tailscale_custom.sh || { echo -e "${RED}ERROR: Failed to set custom.sh permissions.${NC}"; exit 1; }
 mv /tmp/tailscale_custom.sh /userdata/system/custom.sh || { echo -e "${RED}ERROR: Failed to move custom.sh.${NC}"; exit 1; }
 
-# --- Save and Reboot (Verification Post-Reboot) ---
+# --- Save and Reboot ---
 echo -e "${GREEN}------------------------------------------------------------------------${NC}"
 echo -e "${GREEN}Tailscale installation completed. Saving changes and rebooting...${NC}"
 echo -e "${GREEN}------------------------------------------------------------------------${NC}"
@@ -173,31 +166,26 @@ echo -e "${YELLOW}If Tailscale is running, get your IP with:${NC}"
 echo -e "${YELLOW}    /userdata/system/tailscale/bin/tailscale ip -4${NC}"
 echo -e "${YELLOW}Then test SSH from another device:${NC}"
 echo -e "${YELLOW}    ssh root@<your-tailscale-ip>${NC}"
-read -r -p "Save changes and reboot? THIS IS IRREVERSIBLE (yes/no): " SAVE_CHANGES
+echo -e "${YELLOW}Auto-saving and rebooting in 10 seconds (press Ctrl+C to cancel)...${NC}"
+sleep 10
 
-if [[ "$SAVE_CHANGES" == "yes" ]]; then
-    iptables-save | grep -v "100.64.0.0/10" | iptables-restore || { echo -e "${RED}ERROR: Failed to update iptables rules.${NC}"; exit 1; }
-    iptables-save > /userdata/system/iptables.rules
-    mkdir -p /userdata/system/services
-    cat <<EOF > /userdata/system/services/iptablesload.sh
+iptables-save | grep -v "100.64.0.0/10" | iptables-restore || { echo -e "${RED}ERROR: Failed to update iptables rules.${NC}"; exit 1; }
+iptables-save > /userdata/system/iptables.rules
+mkdir -p /userdata/system/services
+cat <<EOF > /userdata/system/services/iptablesload.sh
 #!/bin/bash
 iptables-restore < /userdata/system/iptables.rules
 EOF
-    chmod +x /userdata/system/services/iptablesload.sh
-    if command -v batocera-services &> /dev/null; then
-        batocera-services enable iptablesload
-    else
-        echo -e "${YELLOW}WARNING: batocera-services not found. iptables rules may not persist across reboots.${NC}"
-    fi
-
-    echo ""
-    echo -e "${YELLOW}💾 Saving overlay...${NC}"
-    batocera-save-overlay || { echo -e "${RED}ERROR: Failed to save overlay.${NC}"; exit 1; }
-    echo -e "${GREEN}✅ Overlay saved successfully.${NC}"
-    echo -e "${GREEN}♻️ Rebooting in 10 seconds...${NC}"
-    sleep 10
-    reboot
+chmod +x /userdata/system/services/iptablesload.sh
+if command -v batocera-services &> /dev/null; then
+    batocera-services enable iptablesload
 else
-    echo "Changes not saved. Exiting without rebooting."
-    exit 1
+    echo -e "${YELLOW}WARNING: batocera-services not found. iptables rules may not persist across reboots.${NC}"
 fi
+
+echo ""
+echo -e "${YELLOW}💾 Saving overlay...${NC}"
+batocera-save-overlay || { echo -e "${RED}ERROR: Failed to save overlay.${NC}"; exit 1; }
+echo -e "${GREEN}✅ Overlay saved successfully.${NC}"
+echo -e "${GREEN}♻️ Rebooting now...${NC}"
+reboot
