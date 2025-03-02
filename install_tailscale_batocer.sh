@@ -142,7 +142,7 @@ mkdir -p /run/tailscale /dev/net
 [ -c /dev/net/tun ] || mknod /dev/net/tun c 10 200
 chmod 600 /dev/net/tun
 modprobe tun
-sleep 5  # Wait for TUN to fully load
+sleep 20  # Wait 20 seconds for TUN to fully load
 if ! pgrep -f "/userdata/system/tailscale/bin/tailscaled" > /dev/null; then
     echo "Starting tailscaled at \$(date)" >> \$LOG
     /userdata/system/tailscale/bin/tailscaled --state=/userdata/system/tailscale/tailscaled.state >> \$LOG 2>&1 &
