@@ -63,7 +63,7 @@ if [[ -z "$AUTH_KEY" ]]; then
     echo "   https://login.tailscale.com/admin/settings/keys"
     echo "   - Reusable: ENABLED (required)"
     echo "   - Ephemeral: Optional"
-    echo "   - Tags: tag:ssh-batocera-1"
+    echo "   - Tags: tag:ssh-$HOSTNAME"
     read -r -p "Enter auth key (tskey-auth-...): " AUTH_KEY
 fi
 if [ -z "$AUTH_KEY" ] || ! echo "$AUTH_KEY" | grep -q '^tskey-auth-'; then
@@ -117,15 +117,20 @@ sysctl -p >/dev/null
 
 # --- iptables Setup ---
 echo -e "${YELLOW}Configuring iptables...${NC}"
-iptables-save | grep -v "100.64.0.0/10" | iptables-restore  # Remove Tailscale rules
-iptables -A INPUT -p tcp --dport 22 -j ACCEPT  # Ensure SSH is allowed
+iptables-save | grep -v "100.64.0.0/10" | iptables-restore
+iptables -A INPUT -p tcp --dport 22 -j ACCEPT
 iptables-save > /userdata/system/iptables.rules
+mkdir -p /userdata/system/services
 cat <<EOF > /userdata/system/services/iptablesload.sh
 #!/bin/bash
 iptables-restore < /userdata/system/iptables.rules
 EOF
 chmod +x /userdata/system/services/iptablesload.sh
-batocera-services enable iptablesload 2>/dev/null || echo -e "${YELLOW}WARNING: batocera-services not available; iptables may not persist.${NC}"
+if command -v batocera-services &> /dev/null; then
+    batocera-services enable iptablesload
+else
+    echo -e "${YELLOW}WARNING: batocera-services not found; iptables may not persist.${NC}"
+fi
 
 # --- Startup Script ---
 echo -e "${YELLOW}Configuring autostart...${NC}"
@@ -146,7 +151,7 @@ if ! pgrep -f "/userdata/system/tailscale/bin/tailscaled" > /dev/null; then
         --accept-routes \\
         --authkey="\$(cat /userdata/system/tailscale/authkey)" \\
         --hostname="$HOSTNAME" \\
-        --advertise-tags=tag:ssh-batocera-1 >> \$LOG 2>&1
+        --advertise-tags=tag:ssh-$HOSTNAME >> \$LOG 2>&1
     if [ \$? -ne 0 ]; then
         echo "First tailscale up failed. Retrying at \$(date)" >> \$LOG
         sleep 5
@@ -156,7 +161,7 @@ if ! pgrep -f "/userdata/system/tailscale/bin/tailscaled" > /dev/null; then
             --accept-routes \\
             --authkey="\$(cat /userdata/system/tailscale/authkey)" \\
             --hostname="$HOSTNAME" \\
-            --advertise-tags=tag:ssh-batocera-1 >> \$LOG 2>&1
+            --advertise-tags=tag:ssh-$HOSTNAME >> \$LOG 2>&1
         if [ \$? -ne 0 ]; then
             echo "Tailscale failed again at \$(date). Check key validity." >> \$LOG
             exit 1
@@ -175,7 +180,7 @@ echo -e "${GREEN}---------------------------------------------------------------
 echo -e "${GREEN}Verifying Tailscale...${NC}"
 echo -e "${GREEN}------------------------------------------------------------------------${NC}"
 echo -e "${YELLOW}Waiting for Tailscale (may disrupt local SSH; reconnect if needed)...${NC}"
-sleep 15  # Wait for Tailscale to stabilize
+sleep 15
 for i in {1..12}; do
     if /userdata/system/tailscale/bin/tailscale status >/dev/null 2>&1; then
         echo -e "${GREEN}✅ Tailscale is running!${NC}"
