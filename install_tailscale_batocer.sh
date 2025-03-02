@@ -63,7 +63,7 @@ if [[ -z "$AUTH_KEY" ]]; then
     echo "   https://login.tailscale.com/admin/settings/keys"
     echo "   - Reusable: ENABLED (required)"
     echo "   - Ephemeral: Optional"
-    echo "   - Tags: tag:ssh-$HOSTNAME"
+    echo "   - Tags: tag:ssh-batocera-1"
     read -r -p "Enter auth key (tskey-auth-...): " AUTH_KEY
 fi
 if [ -z "$AUTH_KEY" ] || ! echo "$AUTH_KEY" | grep -q '^tskey-auth-'; then
@@ -151,7 +151,7 @@ if ! pgrep -f "/userdata/system/tailscale/bin/tailscaled" > /dev/null; then
         --accept-routes \\
         --authkey="\$(cat /userdata/system/tailscale/authkey)" \\
         --hostname="$HOSTNAME" \\
-        --advertise-tags=tag:ssh-$HOSTNAME >> \$LOG 2>&1
+        --advertise-tags=tag:ssh-batocera-1 >> \$LOG 2>&1
     if [ \$? -ne 0 ]; then
         echo "First tailscale up failed. Retrying at \$(date)" >> \$LOG
         sleep 5
@@ -161,7 +161,7 @@ if ! pgrep -f "/userdata/system/tailscale/bin/tailscaled" > /dev/null; then
             --accept-routes \\
             --authkey="\$(cat /userdata/system/tailscale/authkey)" \\
             --hostname="$HOSTNAME" \\
-            --advertise-tags=tag:ssh-$HOSTNAME >> \$LOG 2>&1
+            --advertise-tags=tag:ssh-batocera-1 >> \$LOG 2>&1
         if [ \$? -ne 0 ]; then
             echo "Tailscale failed again at \$(date). Check key validity." >> \$LOG
             exit 1
