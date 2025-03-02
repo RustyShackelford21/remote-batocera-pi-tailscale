@@ -1,5 +1,5 @@
 #!/bin/bash
-# Version: 1.0.15 - March 2, 2025
+# Version: 1.0.16 - March 3, 2025
 
 # --- Configuration ---
 AUTH_KEY="${1:-}"  # Use $1 if provided, otherwise prompt
@@ -136,73 +136,56 @@ if ! grep -q "net.ipv6.conf.all.forwarding = 1" /etc/sysctl.conf; then
 fi
 sysctl -p || true
 
-# --- Startup (custom.sh) ---
-rm -f /tmp/tailscale_custom.sh
-cat <<EOF > /tmp/tailscale_custom.sh
-#!/bin/sh
-# Ensure /dev/net and /dev/net/tun exist
-mkdir -p /dev/net
-if [ ! -c /dev/net/tun ]; then
-    mknod /dev/net/tun c 10 200
-    chmod 600 /dev/net/tun
-fi
-# Ensure /run/tailscale exists
-mkdir -p /run/tailscale
-echo "Starting Tailscale at \$(date)" >> /userdata/system/tailscale/boot.log
+# --- Start Tailscale Directly ---
+echo -e "${YELLOW}Starting Tailscale...${NC}"
+rm -f /userdata/system/tailscale/boot.log /userdata/system/tailscale/tailscale_up.log
 
+# Start tailscaled with timeout
+timeout 30s /userdata/system/tailscale/bin/tailscaled --state=/userdata/system/tailscale/tailscaled.state --socket=/run/tailscale/tailscaled.sock >> /userdata/system/tailscale/boot.log 2>&1 &
+sleep 15  # Give tailscaled time to start
 if ! pgrep -f "/userdata/system/tailscale/bin/tailscaled" > /dev/null; then
-    /userdata/system/tailscale/bin/tailscaled --state=/userdata/system/tailscale/tailscaled.state --socket=/run/tailscale/tailscaled.sock >> /userdata/system/tailscale/boot.log 2>&1 &
-    sleep 15  # Give tailscaled time to start
-    if [ ! -f /userdata/system/tailscale/authkey ]; then
-        cp /userdata/system/tailscale/authkey.bak /userdata/system/tailscale/authkey
-    fi
-    export TS_AUTHKEY=\$(cat /userdata/system/tailscale/authkey)
-    # Initial attempt with default tag
-    /userdata/system/tailscale/bin/tailscale up --advertise-routes=$SUBNET --snat-subnet-routes=false --accept-routes --authkey="\$TS_AUTHKEY" --hostname="$HOSTNAME" --advertise-tags=tag:ssh-batocera-1 >> /userdata/system/tailscale/tailscale_up.log 2>&1
-    if [ \$? -ne 0 ]; then
-        sleep 5  # Allow initial attempt to settle
-        # Check for tag error and retry
-        if grep -q "requested tags.*are invalid or not permitted" /userdata/system/tailscale/tailscale_up.log; then
-            echo -e "${YELLOW}Tag 'tag:ssh-batocera-1' failed - auth key may require a different tag.${NC}"
-            read -r -p "Enter the correct tag (e.g., tag:ssh-custom, or leave blank for no tags): " USER_TAG
-            /userdata/system/tailscale/bin/tailscale down 2>/dev/null
-            sleep 5
-            if [ -n "$USER_TAG" ]; then
-                /userdata/system/tailscale/bin/tailscale up --advertise-routes=$SUBNET --snat-subnet-routes=false --accept-routes --authkey="\$TS_AUTHKEY" --hostname="$HOSTNAME" --advertise-tags="$USER_TAG" >> /userdata/system/tailscale/tailscale_up.log 2>&1
-            else
-                /userdata/system/tailscale/bin/tailscale up --advertise-routes=$SUBNET --snat-subnet-routes=false --accept-routes --authkey="\$TS_AUTHKEY" --hostname="$HOSTNAME" >> /userdata/system/tailscale/tailscale_up.log 2>&1
-            fi
-        fi
-        if [ \$? -ne 0 ]; then
-            echo "Tailscale failed to start at \$(date). Check log file." >> /userdata/system/tailscale/tailscale_up.log
-            cat /userdata/system/tailscale/tailscale_up.log >> /userdata/system/tailscale/boot.log
-            exit 1
+    echo -e "${RED}ERROR: tailscaled failed to start. Check logs:${NC}"
+    cat /userdata/system/tailscale/boot.log
+    exit 1
+fi
+echo -e "${GREEN}✅ tailscaled started successfully${NC}"
+
+# Initial tailscale up attempt with default tag
+timeout 30s /userdata/system/tailscale/bin/tailscale up --advertise-routes=$SUBNET --snat-subnet-routes=false --accept-routes --authkey="$AUTH_KEY" --hostname="$HOSTNAME" --advertise-tags=tag:ssh-batocera-1 >> /userdata/system/tailscale/tailscale_up.log 2>&1
+if [ $? -ne 0 ]; then
+    sleep 5  # Allow logs to settle
+    if grep -q "requested tags.*are invalid or not permitted" /userdata/system/tailscale/tailscale_up.log; then
+        echo -e "${YELLOW}Tag 'tag:ssh-batocera-1' failed - auth key may require a different tag.${NC}"
+        read -r -p "Enter the correct tag (e.g., tag:ssh-custom, or leave blank for no tags): " USER_TAG
+        /userdata/system/tailscale/bin/tailscale down 2>/dev/null
+        sleep 5
+        if [ -n "$USER_TAG" ]; then
+            timeout 30s /userdata/system/tailscale/bin/tailscale up --advertise-routes=$SUBNET --snat-subnet-routes=false --accept-routes --authkey="$AUTH_KEY" --hostname="$HOSTNAME" --advertise-tags="$USER_TAG" >> /userdata/system/tailscale/tailscale_up.log 2>&1
         else
-            echo "Tailscale started successfully at \$(date)" >> /userdata/system/tailscale/boot.log
+            timeout 30s /userdata/system/tailscale/bin/tailscale up --advertise-routes=$SUBNET --snat-subnet-routes=false --accept-routes --authkey="$AUTH_KEY" --hostname="$HOSTNAME" >> /userdata/system/tailscale/tailscale_up.log 2>&1
         fi
-    else
-        echo "Tailscale started successfully at \$(date)" >> /userdata/system/tailscale/boot.log
+    fi
+    if [ $? -ne 0 ]; then
+        echo -e "${RED}ERROR: Tailscale failed to start. Check logs:${NC}"
+        if [ -f /userdata/system/tailscale/tailscale_up.log ]; then
+            cat /userdata/system/tailscale/tailscale_up.log
+        else
+            echo "No tailscale_up.log found."
+        fi
+        if [ -f /userdata/system/tailscale/boot.log ]; then
+            cat /userdata/system/tailscale/boot.log
+        else
+            echo "No boot.log found."
+        fi
+        exit 1
     fi
 fi
-EOF
-chmod +x /tmp/tailscale_custom.sh || { echo -e "${RED}ERROR: Failed to set custom.sh permissions.${NC}"; exit 1; }
-mv /tmp/tailscale_custom.sh /userdata/system/custom.sh || { echo -e "${RED}ERROR: Failed to move custom.sh.${NC}"; exit 1; }
+echo -e "${GREEN}✅ Tailscale up command executed${NC}"
 
-# --- Run Tailscale Now for Verification ---
-echo -e "${YELLOW}Starting Tailscale to verify installation...${NC}"
-/bin/bash /userdata/system/custom.sh
-
-# --- Verify Tailscale is Running ---
-echo -e "${GREEN}------------------------------------------------------------------------${NC}"
-echo -e "${GREEN}Verifying Tailscale installation...${NC}"
-echo -e "${GREEN}------------------------------------------------------------------------${NC}"
-echo -e "${YELLOW}Starting Tailscale and fetching IP...${NC}"
-
-# Wait briefly for Tailscale to stabilize, then fetch IP
-sleep 20  # Give Tailscale time to fully start and connect
+# Fetch IP after startup
 TAILSCALE_IP=$(/userdata/system/tailscale/bin/tailscale ip -4 2>/dev/null)
-if [ -z "$TAILSCALE_IP" ] || ! grep -q "Tailscale started successfully" /userdata/system/tailscale/boot.log; then
-    echo -e "${RED}ERROR: Tailscale failed to start or fetch IP. Check logs:${NC}"
+if [ -z "$TAILSCALE_IP" ]; then
+    echo -e "${RED}ERROR: Could not fetch Tailscale IP. Check logs:${NC}"
     if [ -f /userdata/system/tailscale/tailscale_up.log ]; then
         cat /userdata/system/tailscale/tailscale_up.log
     else
@@ -213,11 +196,14 @@ if [ -z "$TAILSCALE_IP" ] || ! grep -q "Tailscale started successfully" /userdat
     else
         echo "No boot.log found."
     fi
-    echo -e "${RED}Installation incomplete. Please troubleshoot.${NC}"
     exit 1
 fi
 
-echo -e "${GREEN}✅ Tailscale is running with IP: $TAILSCALE_IP${NC}"
+# --- Verify Tailscale is Running ---
+echo -e "${GREEN}------------------------------------------------------------------------${NC}"
+echo -e "${GREEN}Verifying Tailscale installation...${NC}"
+echo -e "${GREEN}------------------------------------------------------------------------${NC}"
+echo -e "${GREEN}Tailscale is running with IP: $TAILSCALE_IP${NC}"
 
 # Check status and interface for debug
 /userdata/system/tailscale/bin/tailscale status
@@ -248,6 +234,38 @@ while true; do
         echo "Please enter 'yes' or 'no'."
     fi
 done
+
+# --- Write custom.sh for reboot persistence ---
+cat <<EOF > /userdata/system/custom.sh
+#!/bin/sh
+# Ensure /dev/net and /dev/net/tun exist
+mkdir -p /dev/net
+if [ ! -c /dev/net/tun ]; then
+    mknod /dev/net/tun c 10 200
+    chmod 600 /dev/net/tun
+fi
+# Ensure /run/tailscale exists
+mkdir -p /run/tailscale
+echo "Starting Tailscale at \$(date)" >> /userdata/system/tailscale/boot.log
+
+if ! pgrep -f "/userdata/system/tailscale/bin/tailscaled" > /dev/null; then
+    /userdata/system/tailscale/bin/tailscaled --state=/userdata/system/tailscale/tailscaled.state --socket=/run/tailscale/tailscaled.sock >> /userdata/system/tailscale/boot.log 2>&1 &
+    sleep 15  # Give tailscaled time to start
+    if [ ! -f /userdata/system/tailscale/authkey ]; then
+        cp /userdata/system/tailscale/authkey.bak /userdata/system/tailscale/authkey
+    fi
+    export TS_AUTHKEY=\$(cat /userdata/system/tailscale/authkey)
+    /userdata/system/tailscale/bin/tailscale up --advertise-routes=$SUBNET --snat-subnet-routes=false --accept-routes --authkey="\$TS_AUTHKEY" --hostname="$HOSTNAME" --advertise-tags=tag:ssh-batocera-1 >> /userdata/system/tailscale/tailscale_up.log 2>&1
+    if [ \$? -ne 0 ]; then
+        echo "Tailscale failed to start at \$(date). Check log file." >> /userdata/system/tailscale/tailscale_up.log
+        cat /userdata/system/tailscale/tailscale_up.log >> /userdata/system/tailscale/boot.log
+        exit 1
+    else
+        echo "Tailscale started successfully at \$(date)" >> /userdata/system/tailscale/boot.log
+    fi
+fi
+EOF
+chmod +x /userdata/system/custom.sh || { echo -e "${RED}ERROR: Failed to set custom.sh permissions.${NC}"; exit 1; }
 
 echo -e "${GREEN}------------------------------------------------------------------------${NC}"
 echo -e "${GREEN}Tailscale installation and SSH verified!${NC}"
