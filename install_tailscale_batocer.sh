@@ -48,49 +48,6 @@ fi
 LATEST_VERSION=$(echo "$LATEST_TARBALL" | grep -oP 'tailscale_\K[0-9]+\.[0-9]+\.[0-9]+')
 print_success "Latest Tailscale version detected: $LATEST_VERSION for $ARCH"
 
-# Automatically detect subnet with fallback
-GATEWAY_IP=$(ip route show default | awk '/default/ {print $3}')
-if [[ -z "$GATEWAY_IP" ]]; then
-    print_warning "Could not detect subnet automatically."
-    read -p "Enter your local network subnet (e.g., 192.168.1.0/24): " SUBNET
-else
-    SUBNET=$(echo "$GATEWAY_IP" | awk -F. '{print $1"."$2"."$3".0/24"}')
-    print_message "Detected subnet: $SUBNET"
-    read -p "Is this subnet correct? (yes/no): " SUBNET_CONFIRM
-    if [[ "$SUBNET_CONFIRM" != "yes" ]]; then
-        read -p "Enter your local network subnet (e.g., 192.168.1.0/24): " SUBNET
-    fi
-fi
-print_success "Using subnet: $SUBNET"
-
-# Prompt for hostname
-DEFAULT_HOSTNAME="batocera-1"
-print_message "Setting up device hostname."
-read -p "Enter a hostname (default: $DEFAULT_HOSTNAME): " HOSTNAME
-HOSTNAME=${HOSTNAME:-$DEFAULT_HOSTNAME}
-print_success "Hostname set to: $HOSTNAME"
-
-# Prompt for Tailscale auth key
-while [[ -z "$AUTH_KEY" ]]; do
-    print_message "Generate a REUSABLE auth key at: https://login.tailscale.com/admin/settings/keys"
-    read -p "Enter your Tailscale auth key: " AUTH_KEY
-    if [[ ! "$AUTH_KEY" =~ ^tskey-auth-[a-zA-Z0-9]{24,32}$ ]]; then
-        print_warning "Invalid auth key format. It should start with 'tskey-auth-'."
-        AUTH_KEY=""
-    fi
-done
-print_success "Auth key validated successfully."
-
-# Store the auth key securely
-mkdir -p /userdata/system/tailscale || print_error "Failed to create Tailscale directory."
-echo "$AUTH_KEY" > /userdata/system/tailscale/authkey || print_error "Failed to save auth key."
-chmod 600 /userdata/system/tailscale/authkey || print_error "Failed to set auth key permissions."
-# Store subnet and hostname for startup script
-echo "SUBNET=$SUBNET" > /userdata/system/tailscale/config
-echo "HOSTNAME=$HOSTNAME" >> /userdata/system/tailscale/config
-chmod 600 /userdata/system/tailscale/config
-print_success "Auth key and config stored securely."
-
 # Ensure internet connection before downloading
 print_message "Checking internet connectivity..."
 wget -q --spider https://pkgs.tailscale.com || print_error "No internet connection detected."
@@ -120,7 +77,14 @@ if ! [ -c /dev/net/tun ]; then
     print_message "Creating TUN device..."
     mknod /dev/net/tun c 10 200 && chmod 600 /dev/net/tun || print_error "Failed to create TUN device."
 fi
-modprobe tun || print_warning "TUN module not loaded immediately; will attempt on boot."
+modprobe tun || print_error "TUN module failed to load. Tailscale will not work."
+
+# Store subnet and hostname persistently
+mkdir -p /userdata/system/tailscale
+echo "SUBNET=$SUBNET" > /userdata/system/tailscale/config
+echo "HOSTNAME=$HOSTNAME" >> /userdata/system/tailscale/config
+chmod 600 /userdata/system/tailscale/config
+print_success "Network settings stored successfully."
 
 # Create startup script
 print_message "Creating Tailscale startup script..."
@@ -128,6 +92,13 @@ cat > /userdata/system/tailscale_start.sh << EOF
 #!/bin/sh
 LOG="/userdata/system/tailscale-debug.log"
 echo "Running tailscale_start.sh at \$(date)" >> \$LOG
+
+# Load config
+source /userdata/system/tailscale/config
+
+# Enable IP forwarding on boot
+sysctl -w net.ipv4.ip_forward=1 >> \$LOG 2>&1
+sysctl -w net.ipv6.conf.all.forwarding=1 >> \$LOG 2>&1
 
 # Ensure TUN device exists
 mkdir -p /dev/net
@@ -138,18 +109,15 @@ if ! [ -c /dev/net/tun ]; then
 fi
 
 # Load tun module
-modprobe tun || echo "Warning: TUN module not loaded; Tailscale may fail" >> \$LOG
+modprobe tun || echo "Warning: TUN module failed to load; Tailscale may not work." >> \$LOG
 
-# Enable IP forwarding on boot
-sysctl -w net.ipv4.ip_forward=1 >> \$LOG 2>&1 || echo "Failed to enable IPv4 forwarding" >> \$LOG
-sysctl -w net.ipv6.conf.all.forwarding=1 >> \$LOG 2>&1 || echo "Failed to enable IPv6 forwarding" >> \$LOG
-
-# Load config
-source /userdata/system/tailscale/config
+# Start tailscaled
+echo "Starting tailscaled..." >> \$LOG
+/userdata/system/tailscale/bin/tailscaled --state=/userdata/system/tailscale/tailscaled.state >> \$LOG 2>&1 &
 
 # Wait for network with timeout (120 seconds)
 COUNT=0
-MAX=24  # 24 * 5s = 120s
+MAX=24
 until ping -c 1 -W 2 8.8.8.8 >/dev/null 2>&1; do
     COUNT=\$((COUNT + 1))
     if [ \$COUNT -ge \$MAX ]; then
@@ -159,25 +127,12 @@ until ping -c 1 -W 2 8.8.8.8 >/dev/null 2>&1; do
     echo "Waiting for network... (attempt \$COUNT/\$MAX)" >> \$LOG
     sleep 5
 done
-echo "Network available" >> \$LOG
-
-# Start tailscaled in the background
-/userdata/system/tailscale/bin/tailscaled --state=/userdata/system/tailscale/tailscaled.state >> \$LOG 2>&1 &
-
-# Wait for Tailscale daemon to initialize
-sleep 5
 
 # Connect to Tailscale
+echo "Running Tailscale up..." >> \$LOG
 /userdata/system/tailscale/bin/tailscale up --authkey=\$(cat /userdata/system/tailscale/authkey) \
     --hostname=\$HOSTNAME --advertise-routes=\$SUBNET --snat-subnet-routes=false \
     --accept-routes --advertise-tags=tag:ssh-batocera-1 >> \$LOG 2>&1
-
-if [ \$? -eq 0 ]; then
-    echo "Tailscale started successfully at \$(date)" >> \$LOG
-else
-    echo "Tailscale failed to start" >> \$LOG
-    exit 1
-fi
 EOF
 chmod +x /userdata/system/tailscale_start.sh
 print_success "Startup script created successfully."
@@ -191,22 +146,6 @@ print_success "Autostart configured."
 # Start Tailscale now
 print_message "Starting Tailscale..."
 /bin/sh /userdata/system/tailscale_start.sh >> /userdata/system/tailscale-debug.log 2>&1 &
-
-# Verify status with dynamic polling
-print_message "Verifying Tailscale status..."
-for i in {1..12}; do
-    if /userdata/system/tailscale/bin/tailscale status >/dev/null 2>&1; then
-        print_success "Tailscale is running!"
-        /userdata/system/tailscale/bin/tailscale status
-        break
-    fi
-    print_message "Waiting for Tailscale to start... (attempt $i/12)"
-    sleep $(( i < 6 ? 5 : 10 ))  # 5s for first 6 tries, 10s for last 6
-done
-
-if ! /userdata/system/tailscale/bin/tailscale status >/dev/null 2>&1; then
-    print_warning "Tailscale not running after 60 seconds. Check /userdata/system/tailscale-debug.log for details."
-fi
 
 # Save overlay and reboot
 print_message "Setup complete!"
