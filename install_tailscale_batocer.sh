@@ -38,14 +38,14 @@ fi
 GATEWAY_IP=$(ip route show default | awk '/default/ {print $3}')
 if [[ -z "$GATEWAY_IP" ]]; then
     echo -e "${YELLOW}WARNING: Subnet detection failed.${NC}"
-    read -r -p "Enter subnet (e.g., 192.168.1.0/24): " SUBNET
+    read -r -p "Enter subnet (e.g., 192.168.50.0/24): " SUBNET
     validate_subnet "$SUBNET"
 else
     SUBNET=$(echo "$GATEWAY_IP" | awk -F. '{print $1"."$2"."$3".0/24"}')
     echo -e "${GREEN}✅ Detected subnet: $SUBNET${NC}"
     read -r -p "Is this correct? (yes/no): " SUBNET_CONFIRM
     if [[ "$SUBNET_CONFIRM" != "yes" ]]; then
-        read -r -p "Enter subnet (e.g., 192.168.1.0/24): " SUBNET
+        read -r -p "Enter subnet (e.g., 192.168.50.0/24): " SUBNET
         validate_subnet "$SUBNET"
     fi
 fi
@@ -73,7 +73,7 @@ fi
 
 # --- Install ---
 echo -e "${GREEN}📥 Installing Tailscale...${NC}"
-mkdir -p /userdata/system/tailscale/bin /userdata/system/tailscale
+mkdir -p /userdata/system/tailscale/bin /userdata/system/tailscale /run/tailscale
 echo "$AUTH_KEY" > /userdata/system/tailscale/authkey
 cp /userdata/system/tailscale/authkey /userdata/system/tailscale/authkey.bak
 chmod 600 /userdata/system/tailscale/authkey
@@ -115,15 +115,28 @@ if ! grep -q "net.ipv6.conf.all.forwarding = 1" /etc/sysctl.conf; then
 fi
 sysctl -p >/dev/null
 
+# --- iptables Setup ---
+echo -e "${YELLOW}Configuring iptables...${NC}"
+iptables-save | grep -v "100.64.0.0/10" | iptables-restore  # Remove Tailscale rules
+iptables -A INPUT -p tcp --dport 22 -j ACCEPT  # Ensure SSH is allowed
+iptables-save > /userdata/system/iptables.rules
+cat <<EOF > /userdata/system/services/iptablesload.sh
+#!/bin/bash
+iptables-restore < /userdata/system/iptables.rules
+EOF
+chmod +x /userdata/system/services/iptablesload.sh
+batocera-services enable iptablesload 2>/dev/null || echo -e "${YELLOW}WARNING: batocera-services not available; iptables may not persist.${NC}"
+
 # --- Startup Script ---
 echo -e "${YELLOW}Configuring autostart...${NC}"
 cat <<EOF > /userdata/system/custom.sh
 #!/bin/sh
 LOG="/userdata/system/tailscale/tailscale.log"
+mkdir -p /run/tailscale
 if ! pgrep -f "/userdata/system/tailscale/bin/tailscaled" > /dev/null; then
     echo "Starting tailscaled at \$(date)" >> \$LOG
     /userdata/system/tailscale/bin/tailscaled --state=/userdata/system/tailscale/tailscaled.state >> \$LOG 2>&1 &
-    sleep 5
+    sleep 15
     if [ ! -f /userdata/system/tailscale/authkey ]; then
         cp /userdata/system/tailscale/authkey.bak /userdata/system/tailscale/authkey
     fi
@@ -135,23 +148,34 @@ if ! pgrep -f "/userdata/system/tailscale/bin/tailscaled" > /dev/null; then
         --hostname="$HOSTNAME" \\
         --advertise-tags=tag:ssh-batocera-1 >> \$LOG 2>&1
     if [ \$? -ne 0 ]; then
-        echo "Tailscale failed to start at \$(date). Check key validity." >> \$LOG
-        exit 1
+        echo "First tailscale up failed. Retrying at \$(date)" >> \$LOG
+        sleep 5
+        /userdata/system/tailscale/bin/tailscale up --reset \\
+            --advertise-routes=$SUBNET \\
+            --snat-subnet-routes=false \\
+            --accept-routes \\
+            --authkey="\$(cat /userdata/system/tailscale/authkey)" \\
+            --hostname="$HOSTNAME" \\
+            --advertise-tags=tag:ssh-batocera-1 >> \$LOG 2>&1
+        if [ \$? -ne 0 ]; then
+            echo "Tailscale failed again at \$(date). Check key validity." >> \$LOG
+            exit 1
+        fi
     fi
     echo "Tailscale started successfully at \$(date)" >> \$LOG
 fi
 EOF
 chmod +x /userdata/system/custom.sh
 
-# --- Start Tailscale ---
+# --- Start and Verify ---
 echo -e "${GREEN}Starting Tailscale...${NC}"
 /bin/sh /userdata/system/custom.sh &
 
-# --- Verification ---
 echo -e "${GREEN}------------------------------------------------------------------------${NC}"
 echo -e "${GREEN}Verifying Tailscale...${NC}"
 echo -e "${GREEN}------------------------------------------------------------------------${NC}"
-echo -e "${YELLOW}Waiting for Tailscale...${NC}"
+echo -e "${YELLOW}Waiting for Tailscale (may disrupt local SSH; reconnect if needed)...${NC}"
+sleep 15  # Wait for Tailscale to stabilize
 for i in {1..12}; do
     if /userdata/system/tailscale/bin/tailscale status >/dev/null 2>&1; then
         echo -e "${GREEN}✅ Tailscale is running!${NC}"
@@ -161,7 +185,7 @@ for i in {1..12}; do
     echo -e "${YELLOW}Waiting... (attempt $i/12)${NC}"
     sleep $(( i < 6 ? 5 : 10 ))
     if [ $i -eq 12 ]; then
-        echo -e "${RED}ERROR: Tailscale failed within 60 seconds. Check /userdata/system/tailscale/tailscale.log${NC}"
+        echo -e "${RED}ERROR: Tailscale failed within 75 seconds. Check /userdata/system/tailscale/tailscale.log${NC}"
         cat /userdata/system/tailscale/tailscale.log
         exit 1
     fi
@@ -173,16 +197,19 @@ if [[ -z "$TAILSCALE_IP" ]]; then
     exit 1
 fi
 echo -e "${GREEN}Tailscale IP: $TAILSCALE_IP${NC}"
-echo -e "${YELLOW}Try SSH: ssh root@$TAILSCALE_IP${NC}"
-read -r -p "Did SSH work? (yes/no): " SSH_WORKED
-if [[ "$SSH_WORKED" != "yes" ]]; then
-    echo -e "${RED}ERROR: SSH failed. Do not save.${NC}"
+echo -e "${YELLOW}If SSH dropped, reconnect via: ssh root@$TAILSCALE_IP${NC}"
+echo -e "${YELLOW}Pausing 10s for SSH recovery if needed...${NC}"
+sleep 10
+if ! nc -z -w5 "$TAILSCALE_IP" 22; then
+    echo -e "${RED}ERROR: SSH to $TAILSCALE_IP failed. Check logs.${NC}"
+    cat /userdata/system/tailscale/tailscale.log
     exit 1
 fi
+echo -e "${GREEN}✅ SSH to Tailscale IP works!${NC}"
 
 # --- Save and Reboot ---
 echo -e "${GREEN}------------------------------------------------------------------------${NC}"
-echo -e "${GREEN}Tailscale and SSH verified!${NC}"
+echo -e "${GREEN}Tailscale verified!${NC}"
 read -r -p "Save and reboot? (yes/no): " SAVE_CHANGES
 if [[ "$SAVE_CHANGES" == "yes" ]]; then
     echo -e "${YELLOW}💾 Saving overlay...${NC}"
@@ -194,6 +221,6 @@ if [[ "$SAVE_CHANGES" == "yes" ]]; then
     sleep 5
     reboot
 else
-    echo -e "${YELLOW}Not saved. Exiting.${NC}"
+    echo -e "${YELLOW}Not saved. Run 'batocera-save-overlay' manually to persist.${NC}"
     exit 0
 fi
