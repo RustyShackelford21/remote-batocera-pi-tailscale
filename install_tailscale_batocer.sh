@@ -73,8 +73,8 @@ print_success "Hostname set to: $HOSTNAME"
 while [[ -z "$AUTH_KEY" ]]; do
     print_message "Generate a REUSABLE auth key at: https://login.tailscale.com/admin/settings/keys"
     read -p "Enter your Tailscale auth key: " AUTH_KEY
-    if [[ ! "$AUTH_KEY" =~ ^tskey-auth-[a-zA-Z0-9]{24,32}$ ]]; then
-        print_warning "Invalid auth key format. It should start with 'tskey-auth-' (e.g., tskey-auth-kV4ehSopDN11CNTRL-BvwPkoZYfceRkSg4zbT7dea3tHzB1EP3B)."
+    if [[ ! "$AUTH_KEY" =~ ^tskey-auth-[a-zA-Z0-9-]{40,50}$ ]]; then
+        print_warning "Invalid auth key format. It should start with 'tskey-auth-' and be 40-50 characters long (e.g., tskey-auth-kNNstZW4Sk11CNTRL-oybwJJqrr7PRH9vDewqP7PNiCv8Ug6pEV)."
         AUTH_KEY=""
     fi
 done
