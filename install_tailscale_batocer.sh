@@ -129,11 +129,12 @@ if ! grep -q '^modules-load=tun$' /boot/batocera-boot.conf; then
 fi
 modprobe tun
 
+touch /etc/sysctl.conf
 if ! grep -q "net.ipv4.ip_forward = 1" /etc/sysctl.conf; then
-    echo 'net.ipv4.ip_forward = 1' | tee -a /etc/sysctl.conf
+    echo 'net.ipv4.ip_forward = 1' >> /etc/sysctl.conf
 fi
 if ! grep -q "net.ipv6.conf.all.forwarding = 1" /etc/sysctl.conf; then
-    echo 'net.ipv6.conf.all.forwarding = 1' | tee -a /etc/sysctl.conf
+    echo 'net.ipv6.conf.all.forwarding = 1' >> /etc/sysctl.conf
 fi
 sysctl -p
 
