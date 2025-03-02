@@ -1,4 +1,3 @@
-cat > install_tailscale_batocer.sh << 'EOF'
 #!/bin/bash
 #
 # Batocera Tailscale Installer Script - Optimized Hybrid Version
@@ -74,8 +73,8 @@ print_success "Hostname set to: $HOSTNAME"
 while [[ -z "$AUTH_KEY" ]]; do
     print_message "Generate a REUSABLE auth key at: https://login.tailscale.com/admin/settings/keys"
     read -p "Enter your Tailscale auth key: " AUTH_KEY
-    if [[ ! "$AUTH_KEY" =~ ^tskey-auth-[a-zA-Z0-9-]{40,50}$ ]]; then
-        print_warning "Invalid auth key format. It should start with 'tskey-auth-' and be 40-50 characters long (e.g., tskey-auth-kNNstZW4Sk11CNTRL-oybwJJqrr7PRH9vDewqP7PNiCv8Ug6pEV)."
+    if [[ ! "$AUTH_KEY" =~ ^tskey-auth-[a-zA-Z0-9]{24,32}$ ]]; then
+        print_warning "Invalid auth key format. It should start with 'tskey-auth-'."
         AUTH_KEY=""
     fi
 done
@@ -122,7 +121,7 @@ fi
 # Wait for network with timeout (120 seconds)
 COUNT=0
 MAX=24  # 24 * 5s = 120s
-until ping -c 1 -W 2 8.8.8.8 >/dev/null 2>&1; do
+until wget -q --spider https://1.1.1.1; do
     COUNT=\$((COUNT + 1))
     if [ \$COUNT -ge \$MAX ]; then
         echo "Network timeout after 120 seconds" >> \$LOG
@@ -143,13 +142,6 @@ sleep 5
 /userdata/system/tailscale/bin/tailscale up --authkey=\$(cat /userdata/system/tailscale/authkey) \
     --hostname=$HOSTNAME --advertise-routes=$SUBNET --snat-subnet-routes=false \
     --accept-routes --advertise-tags=tag:ssh-batocera-1 >> \$LOG 2>&1
-
-if [ \$? -eq 0 ]; then
-    echo "Tailscale started successfully at \$(date)" >> \$LOG
-else
-    echo "Tailscale failed to start" >> \$LOG
-    exit 1
-fi
 EOF
 chmod +x /userdata/system/tailscale_start.sh
 print_success "Startup script created successfully."
@@ -164,21 +156,6 @@ print_success "Autostart configured."
 print_message "Starting Tailscale..."
 /bin/sh /userdata/system/tailscale_start.sh >> /userdata/system/tailscale-debug.log 2>&1 &
 
-# Verify status with dynamic polling
-print_message "Verifying Tailscale status..."
-for i in {1..12}; do
-    if /userdata/system/tailscale/bin/tailscale status >/dev/null 2>&1; then
-        print_success "Tailscale is running!"
-        /userdata/system/tailscale/bin/tailscale status
-        break
-    fi
-    print_message "Waiting for Tailscale to start... (attempt $i/12)"
-    sleep $(( i < 6 ? 5 : 10 ))  # 5s for first 6 tries, 10s for last 6
-    if [ $i -eq 12 ]; then
-        print_warning "Tailscale failed to start within 60 seconds. Check /userdata/system/tailscale-debug.log."
-    fi
-done
-
 # Save overlay and reboot
 print_message "Setup complete!"
 read -p "Save changes and reboot? (yes/no): " SAVE_CHANGES
@@ -190,6 +167,3 @@ if [[ "$SAVE_CHANGES" == "yes" ]]; then
 else
     print_warning "Changes will not persist after reboot unless you run 'batocera-save-overlay' manually."
 fi
-EOF
-chmod +x install_tailscale_batocer.sh
-./install_tailscale_batocer.sh
