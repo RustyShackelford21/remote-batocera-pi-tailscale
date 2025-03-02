@@ -1,5 +1,5 @@
 #!/bin/bash
-# Version: 1.0.5 - March 2, 2025
+# Version: 1.0.7 - March 2, 2025
 
 # --- Configuration ---
 AUTH_KEY="${1:-}"  # Use $1 if provided, otherwise prompt
@@ -76,6 +76,7 @@ if [[ -z "$AUTH_KEY" ]]; then
     echo "   Go to: https://login.tailscale.com/admin/settings/keys"
     echo "   - Reusable: ENABLED"
     echo "   - Ephemeral: ENABLED"
+    echo "   - Optional Tags: tag:ssh-$HOSTNAME (if used, must match key settings)"
     read -r -p "Enter your Tailscale auth key (tskey-auth-...): " AUTH_KEY
 fi
 if [ -z "$AUTH_KEY" ] || ! echo "$AUTH_KEY" | grep -q '^tskey-auth-'; then
@@ -120,6 +121,12 @@ if ! grep -q '^modules-load=tun$' /boot/batocera-boot.conf; then
 fi
 modprobe tun || { echo -e "${RED}ERROR: Failed to load tun module.${NC}"; exit 1; }
 
+mkdir -p /dev/net
+if [ ! -c /dev/net/tun ]; then
+    mknod /dev/net/tun c 10 200
+    chmod 600 /dev/net/tun
+fi
+
 touch /etc/sysctl.conf
 if ! grep -q "net.ipv4.ip_forward = 1" /etc/sysctl.conf; then
     echo 'net.ipv4.ip_forward = 1' >> /etc/sysctl.conf
@@ -133,14 +140,19 @@ sysctl -p || true
 rm -f /tmp/tailscale_custom.sh
 cat <<EOF > /tmp/tailscale_custom.sh
 #!/bin/sh
-# Ensure /run/tailscale directory exists (Batocera cleans /run on boot)
+# Ensure /dev/net and /dev/net/tun exist
+mkdir -p /dev/net
+if [ ! -c /dev/net/tun ]; then
+    mknod /dev/net/tun c 10 200
+    chmod 600 /dev/net/tun
+fi
+# Ensure /run/tailscale exists
 mkdir -p /run/tailscale
 echo "Starting Tailscale at \$(date)" >> /userdata/system/tailscale/boot.log
 
 if ! pgrep -f "/userdata/system/tailscale/bin/tailscaled" > /dev/null; then
     /userdata/system/tailscale/bin/tailscaled --state=/userdata/system/tailscale/tailscaled.state --socket=/run/tailscale/tailscaled.sock >> /userdata/system/tailscale/boot.log 2>&1 &
-    sleep 10  # Give it time to initialize
-    # Restore authkey if missing
+    sleep 15  # Give tailscaled time to start
     if [ ! -f /userdata/system/tailscale/authkey ]; then
         cp /userdata/system/tailscale/authkey.bak /userdata/system/tailscale/authkey
     fi
@@ -150,6 +162,8 @@ if ! pgrep -f "/userdata/system/tailscale/bin/tailscaled" > /dev/null; then
         echo "Tailscale failed to start at \$(date). Check log file." >> /userdata/system/tailscale/tailscale_up.log
         cat /userdata/system/tailscale/tailscale_up.log >> /userdata/system/tailscale/boot.log
         exit 1
+    else
+        echo "Tailscale started successfully at \$(date)" >> /userdata/system/tailscale/boot.log
     fi
 fi
 EOF
@@ -164,8 +178,8 @@ echo -e "${YELLOW}Starting Tailscale to verify installation...${NC}"
 echo -e "${GREEN}------------------------------------------------------------------------${NC}"
 echo -e "${GREEN}Verifying Tailscale installation...${NC}"
 echo -e "${GREEN}------------------------------------------------------------------------${NC}"
-echo -e "${YELLOW}Waiting for Tailscale to start (up to 30 seconds)...${NC}"
-for i in {1..15}; do
+echo -e "${YELLOW}Waiting for Tailscale to start (up to 60 seconds)...${NC}"
+for i in {1..30}; do
     if /userdata/system/tailscale/bin/tailscale status &>/dev/null; then
         echo -e "${GREEN}✅ Tailscale is running!${NC}"
         break
@@ -181,16 +195,32 @@ IP_A_EXIT_CODE=$?
 
 if [ "$TAILSCALE_STATUS_EXIT_CODE" -ne 0 ] || [ "$IP_A_EXIT_CODE" -ne 0 ]; then
     echo -e "${RED}ERROR: Tailscale failed to start. Check logs:${NC}"
-    cat /userdata/system/tailscale/tailscale_up.log
-    cat /userdata/system/tailscale/boot.log
+    if [ -f /userdata/system/tailscale/tailscale_up.log ]; then
+        cat /userdata/system/tailscale/tailscale_up.log
+    else
+        echo "No tailscale_up.log found."
+    fi
+    if [ -f /userdata/system/tailscale/boot.log ]; then
+        cat /userdata/system/tailscale/boot.log
+    else
+        echo "No boot.log found."
+    fi
     echo -e "${RED}Installation incomplete. Please troubleshoot.${NC}"
     exit 1
 else
     TAILSCALE_IP=$(/userdata/system/tailscale/bin/tailscale ip -4)
     if [[ -z "$TAILSCALE_IP" ]]; then
         echo -e "${RED}ERROR: Could not retrieve Tailscale IP. Check logs:${NC}"
-        cat /userdata/system/tailscale/tailscale_up.log
-        cat /userdata/system/tailscale/boot.log
+        if [ -f /userdata/system/tailscale/tailscale_up.log ]; then
+            cat /userdata/system/tailscale/tailscale_up.log
+        else
+            echo "No tailscale_up.log found."
+        fi
+        if [ -f /userdata/system/tailscale/boot.log ]; then
+            cat /userdata/system/tailscale/boot.log
+        else
+            echo "No boot.log found."
+        fi
         exit 1
     fi
     echo -e "${GREEN}Tailscale is active with IP: $TAILSCALE_IP${NC}"
@@ -203,8 +233,16 @@ else
         elif [[ "$SSH_CONFIRM" == "no" ]]; then
             echo -e "${RED}ERROR: SSH failed. Check Tailscale status and logs:${NC}"
             /userdata/system/tailscale/bin/tailscale status
-            cat /userdata/system/tailscale/tailscale_up.log
-            cat /userdata/system/tailscale/boot.log
+            if [ -f /userdata/system/tailscale/tailscale_up.log ]; then
+                cat /userdata/system/tailscale/tailscale_up.log
+            else
+                echo "No tailscale_up.log found."
+            fi
+            if [ -f /userdata/system/tailscale/boot.log ]; then
+                cat /userdata/system/tailscale/boot.log
+            else
+                echo "No boot.log found."
+            fi
             echo -e "${RED}Resolve issues before saving.${NC}"
             exit 1
         else
