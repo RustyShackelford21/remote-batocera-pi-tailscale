@@ -245,7 +245,7 @@ chmod +x /userdata/system/custom.sh || { echo -e "${RED}ERROR: Failed to set cus
 
 # --- Verify Tailscale and Local SSH ---
 echo -e "${GREEN}------------------------------------------------------------------------${NC}"
-echo -e "${GREEN}Verifying Tailscale and SSH installation...${NC}"
+echo -e "${GREEN}Verifying Tailscale installation...${NC}"
 echo -e "${GREEN}------------------------------------------------------------------------${NC}"
 echo -e "${GREEN}Tailscale is running with IP: $TAILSCALE_IP${NC}"
 
@@ -253,21 +253,10 @@ echo -e "${GREEN}Tailscale is running with IP: $TAILSCALE_IP${NC}"
 /userdata/system/tailscale/bin/tailscale status
 ip a | grep tailscale0
 
-# Test local SSH from the device itself
-LOCAL_IP=$(ip -4 addr show wlan0 | grep -oP '(?<=inet\s)\d+(\.\d+){3}')
-if ssh root@$LOCAL_IP -o ConnectTimeout=5 </dev/null 2>/dev/null; then
-    echo -e "${GREEN}✅ Local SSH to $LOCAL_IP works from this device${NC}"
-else
-    echo -e "${RED}ERROR: Local SSH to $LOCAL_IP failed from this device. Check SSH service and firewall:${NC}"
-    netstat -tuln | grep :22 || echo "SSH not listening on port 22"
-    iptables -L -v -n | grep 22 || echo "No iptables rule for port 22"
-    exit 1
-fi
-
 echo -e "${YELLOW}Test SSH now via Tailscale IP from another device:${NC}"
 echo -e "${YELLOW}    ssh root@$TAILSCALE_IP${NC}"
 echo -e "${YELLOW}Then, from a device on the same LAN ($SUBNET), test local SSH:${NC}"
-echo -e "${YELLOW}    ssh root@$LOCAL_IP${NC}"
+echo -e "${YELLOW}    ssh root@192.168.50.5${NC}"
 while true; do
     read -r -p "Did both SSH tests work? (yes/no): " SSH_CONFIRM
     if [[ "$SSH_CONFIRM" == "yes" ]]; then
