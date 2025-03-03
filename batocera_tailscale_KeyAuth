@@ -1,11 +1,13 @@
 #!/bin/bash
 #
-# Tailscale Installation Script for Batocera Linux on Raspberry Pi
-# Version: 1.0.16-KeyAuth - Tailscale + Dropbear Key-Based SSH
-# Hybrid with Configurable Hostname, Tag, and Reboot Countdown
-#
+# Improved Tailscale Installation with SSH Key Authentication for Batocera Linux
+# This script automates:
+# 1. Tailscale installation on Batocera
+# 2. SSH key-based authentication setup with automatic conversion
+# 3. Configuration persistence across reboots
+# 4. Handles Tailscale connection properly to prevent disconnection
 
-# --- Color Definitions ---
+# Color definitions for better visual feedback
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -14,249 +16,701 @@ PURPLE='\033[0;35m'
 CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
-# --- Logging Function ---
+# Define log function with timestamp and color
 log() {
-    local color=$1
-    local message=$2
-    echo -e "${color}[$(date '+%Y-%m-%d %H:%M:%S')] $message${NC}" | tee -a /userdata/system/tailscale_install.log
+  local color=$1
+  local message=$2
+  echo -e "${color}[$(date '+%Y-%m-%d %H:%M:%S')] $message${NC}" | tee -a /userdata/system/logs/tailscale_sshkey_setup.log
 }
 
-# --- Progress Bar Function ---
+# Show a simple progress bar
 show_progress() {
-    local duration=$1
-    local steps=10
-    local sleep_time=$(echo "$duration/$steps" | bc -l 2>/dev/null || echo "$duration/$steps" | awk '{print $1}')
-    echo -ne "${CYAN}["
-    for ((i=0; i<$steps; i++)); do
-        sleep $sleep_time
-        echo -ne "#"
-    done
-    echo -e "]${NC}"
+  local duration=$1
+  local total_steps=20
+  local sleep_time=$(echo "$duration/$total_steps" | awk '{print $1}')
+  
+  echo -ne "${CYAN}["
+  for ((i=0; i<$total_steps; i++)); do
+    sleep $sleep_time
+    echo -ne "#"
+  done
+  echo -e "]${NC}"
 }
 
-# --- Configuration ---
-AUTH_KEY="${1:-}"
-TAILSCALE_VERSION="1.80.2"
-DEFAULT_TAG="tag:ssh-batocera-1"
-SSH_DIR="/userdata/system/.ssh"
-AUTH_KEYS_FILE="$SSH_DIR/authorized_keys"
-PRIVATE_KEY_FILE="$SSH_DIR/id_dropbear"
+# Create directories needed for operation
+create_dirs() {
+  mkdir -p /userdata/system/logs
+  mkdir -p /userdata/system/.ssh
+  mkdir -p "/userdata/system/tailscale/keys"
+  chmod 700 /userdata/system/.ssh
+  chmod 700 /userdata/system/tailscale/keys
+}
 
-# --- Script Start ---
+# Check permissions
+check_permissions() {
+  if [ ! -w "/userdata/system" ]; then
+    log "${RED}" "Insufficient permissions to write to /userdata/system"
+    log "${RED}" "Make sure you're running this from the Batocera terminal"
+    exit 1
+  fi
+}
+
+# Script initialization
 clear
+create_dirs
+check_permissions
+
 echo -e "${PURPLE}=========================================================${NC}"
-echo -e "${PURPLE}    Tailscale + Key-Based SSH Installer for Batocera     ${NC}"
+echo -e "${PURPLE}   Tailscale and SSH Key Setup for Batocera Linux        ${NC}"
 echo -e "${PURPLE}=========================================================${NC}"
 echo ""
-log "${BLUE}" "Starting Tailscale + key-based SSH installation..."
+log "${BLUE}" "Starting setup process..."
 
-# --- Root Check ---
-if [ "$(id -u)" -ne 0 ]; then
-    log "${RED}" "⚠️ This script must be run as root"
-    exit 1
-fi
-
-# --- Check Prerequisites ---
-if ! command -v batocera-save-overlay &> /dev/null; then
-    log "${RED}" "ERROR: batocera-save-overlay not found"
-    exit 1
-fi
-if ! command -v dropbearkey &> /dev/null; then
-    log "${RED}" "ERROR: dropbearkey not found—required for key generation"
-    exit 1
-fi
-
-# --- Parse Command Line Arguments ---
+# Parse command line arguments
+TAILSCALE_ARGS=""
 AUTO_CONNECT=false
+AUTHKEY=""
+HOSTNAME="batocera-pi"
+ADVERTISE_ROUTES=""
+ADVERTISE_EXIT_NODE=false
+ACCEPT_ROUTES=false
+AUTO_REBOOT=false
+TAG=""
+
+# Check for command line arguments
 while [[ "$#" -gt 0 ]]; do
-    case $1 in
-        --authkey=*) AUTH_KEY="${1#*=}"; AUTO_CONNECT=true; shift ;;
-        --authkey) AUTH_KEY="$2"; AUTO_CONNECT=true; shift 2 ;;
-        --auto-connect) AUTO_CONNECT=true; shift ;;
-        --uninstall)
-            log "${YELLOW}" "Uninstalling Tailscale and SSH keys..."
-            pkill -f tailscaled 2>/dev/null && log "${GREEN}" "Stopped Tailscale"
-            pkill dropbear 2>/dev/null && log "${GREEN}" "Stopped dropbear"
-            [ -f /userdata/system/custom.sh ] && sed -i '/tailscale/d' /userdata/system/custom.sh
-            rm -rf /userdata/system/tailscale "$SSH_DIR"
-            batocera-save-overlay && log "${GREEN}" "Uninstalled—rebooting" || log "${RED}" "Overlay save failed"
-            reboot
-            exit 0
-            ;;
-        *) log "${RED}" "Unknown option: $1"; exit 1 ;;
-    esac
+  case $1 in
+    --authkey=*) AUTHKEY="${1#*=}"; AUTO_CONNECT=true; shift ;;
+    --authkey) AUTHKEY="$2"; AUTO_CONNECT=true; shift 2 ;;
+    --hostname=*) HOSTNAME="${1#*=}"; shift ;;
+    --hostname) HOSTNAME="$2"; shift 2 ;;
+    --advertise-routes=*) ADVERTISE_ROUTES="${1#*=}"; shift ;;
+    --advertise-routes) ADVERTISE_ROUTES="$2"; shift 2 ;;
+    --exit-node) ADVERTISE_EXIT_NODE=true; shift ;;
+    --accept-routes) ACCEPT_ROUTES=true; shift ;;
+    --auto-reboot) AUTO_REBOOT=true; shift ;;
+    --tag=*) TAG="${1#*=}"; shift ;;
+    --tag) TAG="$2"; shift 2 ;;
+    --help) 
+      echo -e "${GREEN}Usage: $0 [OPTIONS]${NC}"
+      echo ""
+      echo -e "${CYAN}Options:${NC}"
+      echo "  --authkey=KEY             Provide Tailscale auth key for automatic connection"
+      echo "  --hostname=NAME           Set hostname for this device (default: batocera-pi)"
+      echo "  --advertise-routes=SUBNET Advertise subnet routes (e.g., 192.168.1.0/24)"
+      echo "  --exit-node               Advertise this device as an exit node"
+      echo "  --accept-routes           Accept subnet routes from other devices"
+      echo "  --auto-reboot             Automatically reboot after installation"
+      echo "  --tag=TAG                 Apply a Tailscale tag to this device"
+      echo "  --help                    Show this help message"
+      echo ""
+      exit 0
+      ;;
+    *) log "${RED}" "Unknown parameter: $1"; exit 1 ;;
+  esac
 done
 
-# --- User Confirmation ---
-if [ "$AUTO_CONNECT" != "true" ]; then
-    read -r -p "Install Tailscale with key-based SSH? Continue? (yes/no): " CONFIRM
-    [[ "$CONFIRM" != "yes" ]] && { log "${RED}" "❌ Cancelled"; exit 1; }
+# Define variables
+TEMP_DIR="/tmp/tailscale_install"
+INSTALL_DIR="/userdata/system/tailscale"
+SSH_DIR="/userdata/system/.ssh"
+KEYS_DIR="/userdata/system/tailscale/keys"
+TAILSCALE_DONE_FILE="/userdata/system/tailscale/.installed"
+DROPBEAR_DIR="/etc/dropbear"
+ARCH=$(uname -m)
+VERSION="1.62.0"
+
+# Set the correct Tailscale URL based on architecture
+if [[ "$ARCH" == "aarch64" ]]; then
+  TAILSCALE_URL="https://pkgs.tailscale.com/stable/tailscale_${VERSION}_arm64.tgz"
+elif [[ "$ARCH" == "armv7l" ]]; then
+  TAILSCALE_URL="https://pkgs.tailscale.com/stable/tailscale_${VERSION}_arm.tgz"
+else
+  log "${RED}" "Unsupported architecture: $ARCH"
+  log "${RED}" "This script supports ARM64 (aarch64) and ARM (armv7l) architectures"
+  exit 1
 fi
 
-# --- Automatic Subnet Detection ---
-log "${BLUE}" "Detecting network subnet..."
-show_progress 1
-GATEWAY_IP=$(ip route show default | awk '/default/ {print $3}')
-if [[ -z "$GATEWAY_IP" ]]; then
-    log "${YELLOW}" "WARNING: Could not detect subnet"
-    read -r -p "Enter subnet (e.g., 192.168.1.0/24): " SUBNET
-else
-    SUBNET=$(echo "$GATEWAY_IP" | awk -F. '{print $1"."$2"."$3".0/24"}')
-    log "${GREEN}" "✅ Detected: $SUBNET"
-    echo -e "${YELLOW}Note: Only one device can advertise this subnet${NC}"
-    if [ "$AUTO_CONNECT" != "true" ]; then
-        read -r -p "Correct? (yes/no): " SUBNET_CONFIRM
-        [[ "$SUBNET_CONFIRM" != "yes" ]] && read -r -p "Enter subnet: " SUBNET
+# Check for required commands
+check_prerequisites() {
+  log "${BLUE}" "Checking prerequisites..."
+  
+  # Check for curl
+  if ! command -v curl &> /dev/null; then
+    log "${RED}" "Error: curl is required but not found."
+    log "${YELLOW}" "Attempting to install curl..."
+    
+    # Try to install curl using available package manager
+    if command -v pacman &> /dev/null; then
+      pacman -S curl --noconfirm
+    elif command -v batocera-store-install &> /dev/null; then
+      batocera-store-install curl
+    else
+      log "${RED}" "Unable to install curl automatically. Please install manually."
+      exit 1
     fi
-fi
-[[ ! "$SUBNET" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}/[0-9]{1,2}$ ]] && { log "${RED}" "Invalid subnet"; exit 1; }
+    
+    if ! command -v curl &> /dev/null; then
+      log "${RED}" "Failed to install curl. Please install manually and try again."
+      exit 1
+    fi
+  fi
+  
+  # Check for dropbear and dropbearkey
+  if ! command -v dropbear &> /dev/null; then
+    log "${RED}" "Error: dropbear is required but not found. Batocera should include this by default."
+    exit 1
+  fi
+  
+  if ! command -v dropbearkey &> /dev/null; then
+    log "${RED}" "Error: dropbearkey is required but not found. Batocera should include this by default."
+    exit 1
+  fi
+  
+  # Check for dropbearconvert
+  if ! command -v dropbearconvert &> /dev/null; then
+    log "${YELLOW}" "Warning: dropbearconvert not found. Will try to use alternative methods."
+  fi
+  
+  log "${GREEN}" "Prerequisites check completed!"
+}
 
-# --- Hostname Prompt ---
-unset HOSTNAME
-while [[ -z "$HOSTNAME" ]]; do
-    read -r -p "Enter a hostname (e.g., batocera-test): " HOSTNAME
-    [[ -z "$HOSTNAME" ]] && log "${RED}" "ERROR: Hostname cannot be empty"
-done
-log "${GREEN}" "✅ Using hostname: $HOSTNAME"
+# Create directories
+create_directories() {
+  log "${BLUE}" "Step 1/9: Creating directories..."
+  mkdir -p "$TEMP_DIR"
+  mkdir -p "$INSTALL_DIR"
+  mkdir -p "$INSTALL_DIR/state"
+  mkdir -p "$SSH_DIR"
+  mkdir -p "$KEYS_DIR"
+  chmod 700 "$SSH_DIR"
+  chmod 700 "$KEYS_DIR"
+  log "${GREEN}" "Directories created successfully!"
+}
 
-# --- Tag Prompt ---
-TAG="$DEFAULT_TAG"
-if [ "$AUTO_CONNECT" != "true" ]; then
-    read -r -p "Enter Tailscale tag (default: $DEFAULT_TAG, press Enter to accept): " USER_TAG
-    [ -n "$USER_TAG" ] && TAG="$USER_TAG"
-fi
-log "${GREEN}" "✅ Using tag: $TAG"
+# Detect subnet
+detect_subnet() {
+  log "${BLUE}" "Step 2/9: Detecting network subnet..."
+  show_progress 1
+  
+  # Try to detect the local subnet
+  local ip_cmd_output
+  local gateway
+  local subnet
+  
+  ip_cmd_output=$(ip route | grep default)
+  if [ -n "$ip_cmd_output" ]; then
+    gateway=$(echo "$ip_cmd_output" | grep -oE 'via [0-9.]+' | cut -d' ' -f2)
+    # Get the device from the default route
+    local device=$(echo "$ip_cmd_output" | grep -oE 'dev [^ ]+' | cut -d' ' -f2)
+    
+    if [ -n "$device" ]; then
+      # Get the subnet from the device
+      subnet=$(ip route | grep "src" | grep "$device" | grep -v "default" | head -n1 | grep -oE '[0-9.]+/[0-9]+' | head -n1)
+    fi
+  fi
+  
+  if [ -z "$subnet" ]; then
+    subnet=$(ip addr | grep -E "inet .* brd .* scope global" | head -n1 | awk '{print $2}' | grep -oE '[0-9.]+/[0-9]+')
+  fi
+  
+  if [ -n "$subnet" ]; then
+    log "${GREEN}" "✅ Detected: $subnet"
+    echo -e "${YELLOW}Note: Only one device can advertise this subnet${NC}"
+    
+    # Ask to use this subnet if no subnet was provided via command line
+    if [ -z "$ADVERTISE_ROUTES" ]; then
+      echo -ne "Would you like to advertise this subnet? (yes/no): "
+      read -r advertise_answer
+      if [[ "$advertise_answer" =~ ^[Yy][Ee][Ss]$ ]]; then
+        ADVERTISE_ROUTES="$subnet"
+        log "${GREEN}" "✅ Will advertise subnet: $subnet"
+      else
+        log "${YELLOW}" "Not advertising subnet"
+      fi
+    fi
+  else
+    log "${YELLOW}" "Could not detect subnet automatically"
+  fi
+}
 
-# --- Check for Auth Key ---
-if [[ -z "$AUTH_KEY" ]]; then
-    log "${YELLOW}" "🔑 Generate a key at https://login.tailscale.com/admin/settings/keys"
-    read -r -p "Enter Tailscale auth key (tskey-auth-...): " AUTH_KEY
-fi
-[[ -z "$AUTH_KEY" || ! "$AUTH_KEY" =~ ^tskey-auth- ]] && { log "${RED}" "❌ Invalid key"; exit 1; }
+# Set up hostname
+setup_hostname() {
+  # Ask for hostname if not provided
+  if [ "$HOSTNAME" == "batocera-pi" ] && [ -z "$AUTO_CONNECT" ]; then
+    echo -ne "Enter a hostname (default: $HOSTNAME): "
+    read -r new_hostname
+    if [ -n "$new_hostname" ]; then
+      HOSTNAME="$new_hostname"
+    fi
+  fi
+  
+  log "${GREEN}" "✅ Using hostname: $HOSTNAME"
+  
+  # Ask for tag if not provided
+  if [ -z "$TAG" ] && [ -z "$AUTO_CONNECT" ]; then
+    echo -ne "Enter Tailscale tag (optional, press Enter to skip): "
+    read -r new_tag
+    if [ -n "$new_tag" ]; then
+      TAG="$new_tag"
+      log "${GREEN}" "✅ Using tag: $TAG"
+    else
+      log "${YELLOW}" "No tag specified"
+    fi
+  elif [ -n "$TAG" ]; then
+    log "${GREEN}" "✅ Using tag: $TAG"
+  fi
+}
 
-# --- Generate Dropbear SSH Key Pair ---
-log "${BLUE}" "Generating SSH key pair with dropbearkey..."
-show_progress 1
-mkdir -p "$SSH_DIR"
-chmod 700 "$SSH_DIR"
-if [ ! -f "$PRIVATE_KEY_FILE" ]; then
-    dropbearkey -t ed25519 -f "$PRIVATE_KEY_FILE" > /tmp/dropbear_key_output 2>&1 || { log "${RED}" "ERROR: Failed to generate key"; cat /tmp/dropbear_key_output; exit 1; }
-    dropbearkey -y -f "$PRIVATE_KEY_FILE" | grep "^ssh-" > "$AUTH_KEYS_FILE" || { log "${RED}" "ERROR: Failed to extract public key"; exit 1; }
-    log "${GREEN}" "✅ SSH key pair generated"
-else
-    log "${YELLOW}" "SSH key pair exists—using existing keys"
-    dropbearkey -y -f "$PRIVATE_KEY_FILE" | grep "^ssh-" > "$AUTH_KEYS_FILE" || { log "${RED}" "ERROR: Failed to extract public key"; exit 1; }
-fi
-chmod 600 "$AUTH_KEYS_FILE" || { log "${RED}" "ERROR: Failed to set permissions on authorized_keys"; exit 1; }
-chmod 600 "$PRIVATE_KEY_FILE" || { log "${RED}" "ERROR: Failed to set permissions on private key"; exit 1; }
-log "${GREEN}" "✅ Public key added—key auth enabled on reboot"
-echo -e "${YELLOW}Save this private key (convert to OpenSSH format):${NC}"
-dropbearkey -y -f "$PRIVATE_KEY_FILE" || { log "${RED}" "ERROR: Failed to display key"; exit 1; }
-echo -e "${YELLOW}Run on a system with dropbear tools:${NC}"
-echo -e "${YELLOW}  dropbearconvert dropbear openssh $PRIVATE_KEY_FILE <output-file>${NC}"
+# Setup authkey
+setup_authkey() {
+  # Ask for authkey if not provided
+  if [ -z "$AUTHKEY" ]; then
+    log "${CYAN}" "🔑 Generate a key at https://login.tailscale.com/admin/settings/keys"
+    echo -ne "Enter Tailscale auth key (tskey-auth-...): "
+    read -r AUTHKEY
+    
+    if [ -z "$AUTHKEY" ]; then
+      log "${RED}" "No auth key provided, cannot continue"
+      exit 1
+    fi
+  fi
+}
 
-# --- Installation Steps ---
-log "${BLUE}" "📥 Installing Tailscale..."
-show_progress 2
-mkdir -p /userdata/system/tailscale/bin /run/tailscale
-wget -O /tmp/tailscale.tgz "https://pkgs.tailscale.com/stable/tailscale_${TAILSCALE_VERSION}_arm64.tgz" || { log "${RED}" "Download failed"; exit 1; }
-gunzip -c /tmp/tailscale.tgz > /tmp/tailscale.tar || { log "${RED}" "Decompress failed"; exit 1; }
-tar -xf /tmp/tailscale.tar -C /tmp || { log "${RED}" "Extract failed"; exit 1; }
-mv /tmp/tailscale_*_arm64/tailscale /tmp/tailscale_*_arm64/tailscaled /userdata/system/tailscale/bin/ || { log "${RED}" "Move failed"; exit 1; }
-rm -rf /tmp/tailscale_* /tmp/tailscale*
-chmod +x /userdata/system/tailscale/bin/*
+# Generate or setup SSH keys
+setup_ssh_keys() {
+  log "${BLUE}" "Step 3/9: Setting up SSH keys..."
+  
+  # Generate dropbear keys
+  log "${YELLOW}" "Generating SSH key pair with dropbearkey..."
+  show_progress 1
+  
+  # Generate dropbear key
+  if [ -f "$SSH_DIR/id_dropbear" ]; then
+    log "${YELLOW}" "Existing Dropbear key found, backing up..."
+    cp "$SSH_DIR/id_dropbear" "$SSH_DIR/id_dropbear.bak"
+  fi
+  
+  # Generate new key
+  dropbearkey -t ed25519 -f "$SSH_DIR/id_dropbear" 2>/dev/null
+  
+  if [ ! -f "$SSH_DIR/id_dropbear" ]; then
+    log "${RED}" "Failed to generate ED25519 key, trying RSA..."
+    dropbearkey -t rsa -s 4096 -f "$SSH_DIR/id_dropbear" 2>/dev/null
+    
+    if [ ! -f "$SSH_DIR/id_dropbear" ]; then
+      log "${RED}" "Failed to generate SSH keys. Exiting."
+      exit 1
+    fi
+  fi
+  
+  chmod 600 "$SSH_DIR/id_dropbear"
+  
+  # Extract public key and create authorized_keys
+  dropbearkey -y -f "$SSH_DIR/id_dropbear" | grep "^ssh-" > "$SSH_DIR/authorized_keys"
+  chmod 600 "$SSH_DIR/authorized_keys"
+  
+  log "${GREEN}" "✅ SSH key pair generated"
+  log "${GREEN}" "✅ Public key added—key auth enabled on reboot"
+  
+  # Convert key to OpenSSH format if dropbearconvert is available
+  convert_and_save_key
+}
 
-# --- Configure Network ---
-log "${BLUE}" "Configuring network..."
-show_progress 1
-if ! grep -q '^modules-load=tun$' /boot/batocera-boot.conf; then
-    mount -o remount,rw /boot || { log "${RED}" "Mount failed"; exit 1; }
-    echo 'modules-load=tun' >> /boot/batocera-boot.conf
-    mount -o remount,ro /boot
-fi
-modprobe tun || { log "${RED}" "tun failed"; exit 1; }
-mkdir -p /dev/net
-[ ! -c /dev/net/tun ] && mknod /dev/net/tun c 10 200 && chmod 600 /dev/net/tun
-touch /etc/sysctl.conf
-grep -q "net.ipv4.ip_forward = 1" /etc/sysctl.conf || echo 'net.ipv4.ip_forward = 1' >> /etc/sysctl.conf
-grep -q "net.ipv6.conf.all.forwarding = 1" /etc/sysctl.conf || echo 'net.ipv6.conf.all.forwarding = 1' >> /etc/sysctl.conf
-sysctl -p || true
+# Convert and save key in a user-friendly way
+convert_and_save_key() {
+  local openssh_key="$KEYS_DIR/id_ed25519"
+  local openssh_key_pub="$KEYS_DIR/id_ed25519.pub"
+  local instructions_file="$KEYS_DIR/SSH_INSTRUCTIONS.txt"
+  
+  # Try to convert the key to OpenSSH format
+  if command -v dropbearconvert &> /dev/null; then
+    log "${CYAN}" "Converting Dropbear key to OpenSSH format..."
+    
+    if dropbearconvert dropbear openssh "$SSH_DIR/id_dropbear" "$openssh_key" 2>/dev/null; then
+      chmod 600 "$openssh_key"
+      
+      # Extract public key if we have the private key
+      if [ -f "$openssh_key" ]; then
+        # Extract content from authorized_keys
+        cat "$SSH_DIR/authorized_keys" > "$openssh_key_pub"
+        chmod 644 "$openssh_key_pub"
+      fi
+      
+      log "${GREEN}" "✅ SSH key converted to OpenSSH format"
+      log "${GREEN}" "✅ Saved to $openssh_key"
+    else
+      log "${RED}" "❌ Failed to convert key automatically"
+    fi
+  else
+    log "${YELLOW}" "dropbearconvert not available, cannot automatically convert key"
+    # Copy the raw key for manual conversion
+    cp "$SSH_DIR/id_dropbear" "$KEYS_DIR/id_dropbear.raw"
+    chmod 600 "$KEYS_DIR/id_dropbear.raw"
+  fi
+  
+  # Create instructions file regardless of conversion success
+  create_ssh_instructions "$instructions_file"
+}
 
-# --- Start Tailscale and Write custom.sh ---
-log "${BLUE}" "Starting Tailscale and configuring custom.sh..."
-show_progress 2
-timeout 30s /userdata/system/tailscale/bin/tailscaled --state=/userdata/system/tailscale/tailscaled.state --socket=/run/tailscale/tailscaled.sock >> /userdata/system/tailscale/boot.log 2>&1 &
-sleep 15
-pgrep -f tailscaled || { log "${RED}" "tailscaled failed"; cat /userdata/system/tailscale/boot.log; exit 1; }
-log "${GREEN}" "✅ tailscaled started"
-timeout 30s /userdata/system/tailscale/bin/tailscale up --advertise-routes="$SUBNET" --snat-subnet-routes=false --accept-routes --authkey="$AUTH_KEY" --hostname="$HOSTNAME" --advertise-tags="$TAG" >> /userdata/system/tailscale/tailscale_up.log 2>&1 || { log "${RED}" "Tailscale up failed"; cat /userdata/system/tailscale/tailscale_up.log; exit 1; }
-log "${GREEN}" "✅ Tailscale up executed"
+# Create detailed SSH instructions file
+create_ssh_instructions() {
+  local instructions_file="$1"
+  local public_key=$(cat "$SSH_DIR/authorized_keys")
+  local device_hostname=$(hostname)
+  
+  # Create the instructions file
+  cat > "$instructions_file" << EOF
+=======================================================================
+               SSH KEY AUTHENTICATION INSTRUCTIONS
+=======================================================================
 
-TAILSCALE_IP=$(/userdata/system/tailscale/bin/tailscale ip -4 2>/dev/null)
-[ -z "$TAILSCALE_IP" ] && { log "${RED}" "No Tailscale IP"; cat /userdata/system/tailscale/tailscale_up.log /userdata/system/tailscale/boot.log; exit 1; }
+Your Batocera system is now configured with key-based SSH authentication
+for enhanced security. Password authentication will be disabled after reboot.
 
-# --- Write custom.sh ---
-cat > /userdata/system/custom.sh <<EOF
-#!/bin/sh
-# --- Logging ---
-LOG="/userdata/system/tailscale/tailscale_custom.log"
-log() { echo "[\$(date '+%Y-%m-%d %H:%M:%S')] \$1" >> "\$LOG"; }
+PUBLIC KEY:
+$public_key
 
-log "custom.sh started"
+KEY FILES LOCATION ON BATOCERA:
+- Private key (Dropbear format): /userdata/system/.ssh/id_dropbear
+- Converted key (OpenSSH format): /userdata/system/tailscale/keys/id_ed25519
+- Public key: /userdata/system/tailscale/keys/id_ed25519.pub
+- This instructions file: /userdata/system/tailscale/keys/SSH_INSTRUCTIONS.txt
 
-# --- Ensure Tailscale ---
-if ! pgrep -f "/userdata/system/tailscale/bin/tailscaled" > /dev/null; then
-    log "Starting tailscaled..."
-    mkdir -p /dev/net
-    [ ! -c /dev/net/tun ] && mknod /dev/net/tun c 10 200 && chmod 600 /dev/net/tun
-    mkdir -p /run/tailscale
-    /userdata/system/tailscale/bin/tailscaled --state=/userdata/system/tailscale/tailscaled.state --socket=/run/tailscale/tailscaled.sock >> /userdata/system/tailscale/boot.log 2>&1 &
-    for i in {1..30}; do
-        [ -S /run/tailscale/tailscaled.sock ] && break
-        sleep 1
-    done
-    [ ! -S /run/tailscale/tailscaled.sock ] && { log "ERROR: tailscaled socket not found"; exit 1; }
-    log "Running tailscale up..."
-    AUTH_KEY=\$(cat /userdata/system/tailscale/authkey 2>/dev/null || echo "$AUTH_KEY")
-    /userdata/system/tailscale/bin/tailscale up --advertise-routes="$SUBNET" --snat-subnet-routes=false --accept-routes --authkey="\$AUTH_KEY" --hostname="$HOSTNAME" --advertise-tags="$TAG" >> /userdata/system/tailscale/tailscale_up.log 2>&1
-    [ \$? -eq 0 ] || { log "ERROR: tailscale up failed—see tailscale_up.log"; exit 1; }
-else
-    log "tailscaled already running"
-fi
+CONNECTING FROM LINUX/MAC:
+1. Copy the OpenSSH private key to your computer:
+   scp root@$device_hostname:/userdata/system/tailscale/keys/id_ed25519 ~/.ssh/batocera_key
 
-# --- Force Dropbear Key-Only Auth ---
-log "Configuring Dropbear for key-only auth..."
-pkill dropbear 2>/dev/null
-dropbear -s &>/dev/null &
-sleep 1
-pgrep dropbear || { log "ERROR: Dropbear failed to start"; exit 1; }
-log "custom.sh finished"
+2. Set proper permissions:
+   chmod 600 ~/.ssh/batocera_key
+
+3. Connect using the key:
+   ssh -i ~/.ssh/batocera_key root@<tailscale-ip>
+
+CONNECTING FROM WINDOWS:
+1. Use WinSCP or SFTP to download the converted key
+2. Use the key with PuTTY or other SSH clients
+
+TROUBLESHOOTING:
+If you're unable to connect after reboot, you can temporarily re-enable 
+password authentication by editing custom.sh from EmulationStation:
+
+1. Press START in EmulationStation
+2. Go to System Settings > Developer > File Manager
+3. Navigate to /userdata/system/
+4. Edit custom.sh and remove or comment out the "# Disable password auth" section
+5. Save and reboot
+
+=======================================================================
 EOF
-chmod +x /userdata/system/custom.sh || { log "${RED}" "ERROR: Failed to set custom.sh permissions"; exit 1; }
-echo "$AUTH_KEY" > /userdata/system/tailscale/authkey
-chmod 600 /userdata/system/tailscale/authkey
 
-# --- Verify ---
-log "${BLUE}" "Verifying installation..."
-show_progress 1
-echo -e "${GREEN}Tailscale running at IP: $TAILSCALE_IP${NC}"
-/userdata/system/tailscale/bin/tailscale status
-ip a | grep tailscale0
-echo -e "${YELLOW}Test SSH post-reboot: ssh -i <path-to-converted-key> root@$TAILSCALE_IP${NC}"
-echo -e "${YELLOW}Note: Current session uses password; reboot enables key-only auth${NC}"
-echo -e "${YELLOW}Convert key: dropbearconvert dropbear openssh $PRIVATE_KEY_FILE <output-file>${NC}"
-if [ "$AUTO_CONNECT" != "true" ]; then
-    while true; do read -r -p "Proceed to save and reboot? (yes/no): " REBOOT_CONFIRM; [[ "$REBOOT_CONFIRM" =~ ^(yes|no)$ ]] && break; echo "Please enter 'yes' or 'no'"; done
-    [[ "$REBOOT_CONFIRM" == "no" ]] && { log "${YELLOW}" "Not rebooting—test SSH manually after reboot"; exit 0; }
+  chmod 644 "$instructions_file"
+  log "${GREEN}" "✅ Created SSH instructions file at $instructions_file"
+}
+
+# Download Tailscale
+download_tailscale() {
+  log "${BLUE}" "Step 4/9: Downloading Tailscale v${VERSION}..."
+  echo -e "${YELLOW}Downloading from: ${TAILSCALE_URL}${NC}"
+  
+  if ! curl -fsSL "$TAILSCALE_URL" -o "$TEMP_DIR/tailscale.tgz"; then
+    log "${RED}" "Error: Failed to download Tailscale. Check your internet connection."
+    exit 1
+  fi
+  
+  log "${GREEN}" "✅ Tailscale download completed successfully!"
+}
+
+# Extract and install Tailscale
+install_tailscale() {
+  log "${BLUE}" "Step 5/9: Installing Tailscale..."
+  
+  if ! tar -xzf "$TEMP_DIR/tailscale.tgz" -C "$TEMP_DIR"; then
+    log "${RED}" "Error: Failed to extract Tailscale archive."
+    exit 1
+  fi
+  
+  # Move the extracted files to the installation directory
+  cp -a "$TEMP_DIR"/tailscale_${VERSION}_*/tailscale "$INSTALL_DIR/"
+  cp -a "$TEMP_DIR"/tailscale_${VERSION}_*/tailscaled "$INSTALL_DIR/"
+  
+  # Make the binaries executable
+  chmod +x "$INSTALL_DIR/tailscale"
+  chmod +x "$INSTALL_DIR/tailscaled"
+  
+  log "${GREEN}" "✅ Tailscale installed successfully!"
+}
+
+# Configure network for routing
+configure_network() {
+  log "${BLUE}" "Step 6/9: Configuring network..."
+  show_progress 1
+  
+  # Enable IP forwarding if needed for subnet routing
+  if [ -n "$ADVERTISE_ROUTES" ] || [ "$ADVERTISE_EXIT_NODE" = true ]; then
+    # Enable IP forwarding
+    echo "net.ipv4.ip_forward = 1" > /etc/sysctl.d/99-tailscale.conf
+    echo "net.ipv6.conf.all.forwarding = 1" >> /etc/sysctl.d/99-tailscale.conf
+    
+    # Apply sysctl settings
+    sysctl -p /etc/sysctl.d/99-tailscale.conf
+    
+    log "${GREEN}" "✅ IP forwarding enabled for routing"
+  fi
+}
+
+# Configure Tailscale and SSH persistence
+configure_persistence() {
+  log "${BLUE}" "Step 7/9: Configuring persistence..."
+  
+  # Create startup script
+  cat > "$INSTALL_DIR/start_tailscale.sh" << 'EOF'
+#!/bin/sh
+INSTALL_DIR="/userdata/system/tailscale"
+SSH_DIR="/userdata/system/.ssh"
+DROPBEAR_DIR="/etc/dropbear"
+
+# Create Dropbear directory if it doesn't exist
+mkdir -p "$DROPBEAR_DIR"
+
+# Link SSH keys to Dropbear
+if [ -f "$SSH_DIR/authorized_keys" ]; then
+  ln -sf "$SSH_DIR/authorized_keys" "$DROPBEAR_DIR/authorized_keys"
+  chmod 700 "$DROPBEAR_DIR"
+  chmod 600 "$DROPBEAR_DIR/authorized_keys"
 fi
 
-# --- Save Overlay with Countdown ---
-log "${BLUE}" "Saving overlay..."
-show_progress 1
-batocera-save-overlay || { log "${RED}" "Overlay save failed"; exit 1; }
-log "${GREEN}" "✅ Installation complete—rebooting in 5 seconds..."
-for i in 5 4 3 2 1; do
-    echo -e "${YELLOW}Rebooting in $i...${NC}"
-    sleep 1
-done
-reboot
+# Configure Dropbear for key-based auth only
+if [ -f /etc/default/dropbear ]; then
+  # Backup original config if it exists and we haven't backed it up yet
+  if [ ! -f /etc/default/dropbear.orig ]; then
+    cp /etc/default/dropbear /etc/default/dropbear.orig
+  fi
+  
+  # Modify to disable password authentication after reboot
+  sed -i 's/^DROPBEAR_EXTRA_ARGS=.*/DROPBEAR_EXTRA_ARGS="-s -g"/' /etc/default/dropbear
+fi
+
+# Start tailscaled in the background
+"$INSTALL_DIR/tailscaled" --state="$INSTALL_DIR/state/tailscaled.state" --socket="$INSTALL_DIR/tailscaled.sock" &
+
+# Wait for the socket to be created
+sleep 5
+
+# Try to reconnect using saved state with SSH enabled
+"$INSTALL_DIR/tailscale" --socket="$INSTALL_DIR/tailscaled.sock" up --ssh --reset
+EOF
+  
+  # Make the startup script executable
+  chmod +x "$INSTALL_DIR/start_tailscale.sh"
+  
+  # Create or update custom.sh
+  if [ ! -f /userdata/system/custom.sh ]; then
+    echo "#!/bin/sh" > /userdata/system/custom.sh
+    chmod +x /userdata/system/custom.sh
+  else
+    # Backup custom.sh
+    cp /userdata/system/custom.sh /userdata/system/custom.sh.bak
+    log "${YELLOW}" "Backed up existing custom.sh to custom.sh.bak"
+  fi
+  
+  # Make sure custom.sh ends with a newline
+  if [ -s /userdata/system/custom.sh ] && [ "$(tail -c 1 /userdata/system/custom.sh | wc -l)" -eq 0 ]; then
+    echo "" >> /userdata/system/custom.sh
+  fi
+  
+  # Add Tailscale startup to custom.sh if not already there
+  if ! grep -q "start_tailscale.sh" /userdata/system/custom.sh; then
+    echo "# Start Tailscale" >> /userdata/system/custom.sh
+    echo "$INSTALL_DIR/start_tailscale.sh &" >> /userdata/system/custom.sh
+    log "${GREEN}" "✅ Added Tailscale to startup scripts!"
+  fi
+  
+  log "${GREEN}" "✅ Persistence configured!"
+}
+
+# Start Tailscale and connect to network
+start_tailscale() {
+  log "${BLUE}" "Step 8/9: Starting Tailscale service..."
+  
+  # Kill any existing tailscaled process
+  if pgrep tailscaled > /dev/null; then
+    pkill tailscaled
+    sleep 2
+  fi
+  
+  # Start the tailscale daemon
+  "$INSTALL_DIR/tailscaled" --state="$INSTALL_DIR/state/tailscaled.state" --socket="$INSTALL_DIR/tailscaled.sock" &
+  
+  # Wait for the socket to be created
+  sleep 3
+  
+  # Save the PID
+  local tailscaled_pid=$(pgrep tailscaled)
+  
+  # Check if tailscaled is running
+  if [ -n "$tailscaled_pid" ]; then
+    log "${GREEN}" "✅ tailscaled started (PID: $tailscaled_pid)"
+  else
+    log "${RED}" "Warning: Tailscale daemon did not start properly."
+    return 1
+  fi
+  
+  # Build up tailscale command with all options
+  local ts_cmd="$INSTALL_DIR/tailscale --socket=\"$INSTALL_DIR/tailscaled.sock\" up --hostname=\"$HOSTNAME\" --ssh"
+  
+  # Add tag if specified
+  if [ -n "$TAG" ]; then
+    ts_cmd="$ts_cmd --advertise-tags=\"$TAG\""
+  fi
+  
+  # Add subnet routes if specified
+  if [ -n "$ADVERTISE_ROUTES" ]; then
+    ts_cmd="$ts_cmd --advertise-routes=\"$ADVERTISE_ROUTES\""
+  fi
+  
+  # Add exit node flag if specified
+  if [ "$ADVERTISE_EXIT_NODE" = true ]; then
+    ts_cmd="$ts_cmd --advertise-exit-node"
+  fi
+  
+  # Add accept routes flag if specified
+  if [ "$ACCEPT_ROUTES" = true ]; then
+    ts_cmd="$ts_cmd --accept-routes"
+  fi
+  
+  # Add auth key if provided
+  if [ -n "$AUTHKEY" ]; then
+    ts_cmd="$ts_cmd --authkey=\"$AUTHKEY\""
+  fi
+  
+  # Run the tailscale up command
+  log "${YELLOW}" "Executing: tailscale up with appropriate flags..."
+  eval "$ts_cmd"
+  
+  # Check if connect was successful by checking if tailscale is running
+  sleep 2
+  if "$INSTALL_DIR/tailscale" --socket="$INSTALL_DIR/tailscaled.sock" status &>/dev/null; then
+    log "${GREEN}" "✅ Tailscale up executed"
+    
+    # Create a file indicating Tailscale was installed
+    touch "$TAILSCALE_DONE_FILE"
+    
+    return 0
+  else
+    log "${RED}" "❌ Failed to connect to Tailscale network"
+    return 1
+  fi
+}
+
+# Clean up temporary files
+cleanup() {
+  log "${BLUE}" "Step 9/9: Cleaning up..."
+  rm -rf "$TEMP_DIR"
+  log "${GREEN}" "✅ Cleanup completed!"
+}
+
+# Verify installation
+verify_installation() {
+  log "${BLUE}" "Verifying installation..."
+  show_progress 1
+  
+  local errors=0
+  local tailscale_ip=""
+  
+  # Check Tailscale binaries
+  if [ ! -f "$INSTALL_DIR/tailscale" ] || [ ! -f "$INSTALL_DIR/tailscaled" ]; then
+    log "${RED}" "❌ Verification failed: Tailscale binaries not found."
+    errors=$((errors+1))
+  fi
+  
+  # Check Tailscale daemon
+  if ! pgrep tailscaled > /dev/null; then
+    log "${RED}" "❌ Verification failed: Tailscale daemon is not running."
+    errors=$((errors+1))
+  else
+    # Get Tailscale IP
+    tailscale_ip=$("$INSTALL_DIR/tailscale" --socket="$INSTALL_DIR/tailscaled.sock" ip -4 2>/dev/null)
+    if [ -n "$tailscale_ip" ]; then
+      log "${GREEN}" "Tailscale running at IP: $tailscale_ip"
+      
+      # Show Tailscale status
+      "$INSTALL_DIR/tailscale" --socket="$INSTALL_DIR/tailscaled.sock" status
+    else
+      log "${RED}" "❌ Verification failed: Tailscale IP not available."
+      errors=$((errors+1))
+    fi
+  fi
+  
+  # Check SSH key setup
+  if [ ! -f "$SSH_DIR/authorized_keys" ]; then
+    log "${RED}" "❌ Verification failed: SSH authorized_keys not found."
+    errors=$((errors+1))
+  fi
+  
+  # Check network interface
+  ip addr show tailscale0 2>/dev/null || log "${RED}" "❌ Verification warning: tailscale0 interface not found."
+  
+  if [ $errors -eq 0 ]; then
+    log "${GREEN}" "✅ Verification successful: Tailscale and SSH keys are properly installed!"
+    return 0
+  else
+    log "${RED}" "❌ Verification found $errors issue(s). Some manual configuration may be needed."
+    return 1
+  fi
+}
+
+# Show detailed information and next steps
+show_info() {
+  local tailscale_ip=$("$INSTALL_DIR/tailscale" --socket="$INSTALL_DIR/tailscaled.sock" ip -4 2>/dev/null)
+  local openssh_key="$KEYS_DIR/id_ed25519"
+  
+  echo -e "${PURPLE}=========================================================${NC}"
+  echo -e "${PURPLE}          Tailscale & SSH Key Setup Complete!           ${NC}"
+  echo -e "${PURPLE}=========================================================${NC}"
+  
+  # Show Tailscale IP
+  if [ -n "$tailscale_ip" ]; then
+    echo -e "${CYAN}Tailscale IP:${NC} $tailscale_ip"
+  else
+    echo -e "${YELLOW}Tailscale IP:${NC} Not yet available"
+  fi
+  
+  # Show SSH connection info
+  echo -e "\n${CYAN}SSH CONNECTION INFORMATION:${NC}"
+  
+  if [ -f "$openssh_key" ]; then
+    echo -e "${GREEN}✅ SSH key successfully converted to OpenSSH format${NC}"
+    echo -e "Private key: ${YELLOW}$openssh_key${NC}"
+    echo -e "Connect after reboot with: ${YELLOW}ssh -i <path/to/copied/key> root@$tailscale_ip${NC}"
+  else
+    echo -e "${YELLOW}⚠️ SSH key conversion not completed automatically${NC}"
+    echo -e "Raw key available at: ${YELLOW}$KEYS_DIR/id_dropbear.raw${NC}"
+  fi
+  
+  # Explain what happens next
+  echo -e "\n${CYAN}NEXT STEPS:${NC}"
+  echo -e "1. ${GREEN}Copy the SSH key to your computer${NC} (instructions in $KEYS_DIR/SSH_INSTRUCTIONS.txt)"
+  echo -e "2. ${GREEN}Reboot Batocera${NC} to enable key-based authentication"
+  echo -e "3. ${GREEN}Connect via SSH${NC} using the key instead of password"
+  
+  # Warn about password auth being disabled
+  echo -e "\n${YELLOW}IMPORTANT: Password authentication will be disabled after reboot.${NC}"
+  echo -e "${YELLOW}Make sure you have copied the SSH key before rebooting!${NC}"
+  
+  # Show reboot option
+  if [ "$AUTO_REBOOT" = false ]; then
+    echo -e "\n${PURPLE}=========================================================${NC}"
+    echo -ne "${GREEN}Would you like to reboot now? (yes/no):${NC} "
+    read -r reboot_answer
+    if [[ "$reboot_answer" =~ ^[Yy][Ee][Ss]$ ]]; then
+      echo -e "${YELLOW}Rebooting system...${NC}"
+      sleep 2
+      reboot
+    else
+      echo -e "${YELLOW}Remember to reboot to complete the installation.${NC}"
+    fi
+  else
+    echo -e "\n${YELLOW}Auto-reboot enabled. System will reboot in 10 seconds...${NC}"
+    sleep 10
+    reboot
