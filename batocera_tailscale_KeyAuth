@@ -1,7 +1,7 @@
 #!/bin/bash
 #
 # Improved Tailscale Installation with SSH Key Authentication for Batocera Linux
-# Version: 1.0.16-KeyAuth - Fixed Function, Download, Tag Default
+# Version: 1.0.18-KeyAuth - Tag Handling from 1.0.16, Space Fix
 #
 
 # --- Colors ---
@@ -24,7 +24,7 @@ log() {
 show_progress() {
   local duration=$1
   local total_steps=20
-  local sleep_time=0.05  # Static value
+  local sleep_time=0.05  # Static, Batocera-safe
   echo -ne "${CYAN}["
   for ((i=0; i<$total_steps; i++)); do
     sleep $sleep_time
@@ -69,7 +69,8 @@ ADVERTISE_ROUTES=""
 ADVERTISE_EXIT_NODE=false
 ACCEPT_ROUTES=false
 AUTO_REBOOT=false
-TAG="ssh-batocera-1"  # Default tag
+DEFAULT_TAG="tag:ssh-batocera-1"  # From 1.0.16
+TAG="$DEFAULT_TAG"  # Default tag
 
 while [[ "$#" -gt 0 ]]; do
   case $1 in
@@ -93,7 +94,7 @@ while [[ "$#" -gt 0 ]]; do
       echo "  --exit-node             Advertise as exit node"
       echo "  --accept-routes         Accept subnet routes"
       echo "  --auto-reboot           Reboot after install"
-      echo "  --tag=TAG               Tailscale tag (default: ssh-batocera-1)"
+      echo "  --tag=TAG               Tailscale tag (default: $DEFAULT_TAG)"
       exit 0
       ;;
     *) log "${RED}" "Unknown parameter: $1"; exit 1 ;;
@@ -101,7 +102,7 @@ while [[ "$#" -gt 0 ]]; do
 done
 
 # --- Variables ---
-TEMP_DIR="/tmp/tailscale_install"
+TEMP_DIR="/userdata/system/tailscale_install"  # Persistent storage
 INSTALL_DIR="/userdata/system/tailscale"
 SSH_DIR="/userdata/system/.ssh"
 KEYS_DIR="/userdata/system/tailscale/keys"
@@ -123,14 +124,9 @@ fi
 # --- Check Prerequisites ---
 check_prerequisites() {
   log "${BLUE}" "Checking prerequisites..."
-  if ! command -v curl &> /dev/null; then
-    log "${RED}" "Error: curl required—not found"
-    exit 1
-  fi
-  if ! command -v dropbear &> /dev/null || ! command -v dropbearkey &> /dev/null; then
-    log "${RED}" "Error: dropbear or dropbearkey missing"
-    exit 1
-  fi
+  for cmd in curl dropbear dropbearkey modprobe; do
+    command -v $cmd &> /dev/null || { log "${RED}" "Error: $cmd required—not found"; exit 1; }
+  done
   log "${GREEN}" "Prerequisites OK!"
 }
 
@@ -146,7 +142,7 @@ detect_subnet() {
     SUBNET=$(echo "$GATEWAY_IP" | awk -F. '{print $1"."$2"."$3".0/24"}')
     log "${GREEN}" "✅ Detected: $SUBNET"
     echo -e "${YELLOW}Note: Only one device can advertise this subnet${NC}"
-    if [ -z "$ADVERTISE_ROUTES" ] && [ "$AUTO_CONNECT" != "true" ]; then
+    if [ "$AUTO_CONNECT" != "true" ]; then
       read -r -p "Advertise this subnet? (yes/no): " advertise_answer
       [[ "$advertise_answer" =~ ^[Yy][Ee][Ss]$ ]] && ADVERTISE_ROUTES="$SUBNET"
     fi
@@ -162,8 +158,8 @@ setup_hostname() {
   fi
   log "${GREEN}" "✅ Using hostname: $HOSTNAME"
   if [ "$AUTO_CONNECT" != "true" ]; then
-    read -r -p "Enter Tailscale tag (default: $TAG, press Enter to keep): " new_tag
-    [ -n "$new_tag" ] && TAG="$new_tag"
+    read -r -p "Enter Tailscale tag (default: $DEFAULT_TAG, press Enter to accept): " USER_TAG
+    [ -n "$USER_TAG" ] && TAG="$USER_TAG"
   fi
   log "${GREEN}" "✅ Using tag: $TAG"
 }
@@ -257,9 +253,8 @@ EOF
 # --- Download Tailscale ---
 download_tailscale() {
   log "${BLUE}" "Step 4/9: Downloading Tailscale v${VERSION}..."
-  # Check tmp space
-  df -h /tmp | tail -n 1 | awk '{print $4}' | grep -q "M" || { log "${RED}" "Insufficient space in /tmp"; exit 1; }
-  curl -fsSL --retry 3 "$TAILSCALE_URL" -o "$TEMP_DIR/tailscale.tgz" || { log "${RED}" "Download failed—check space/network"; exit 1; }
+  mkdir -p "$TEMP_DIR"
+  curl -fsSL --retry 3 "$TAILSCALE_URL" -o "$TEMP_DIR/tailscale.tgz" || { log "${RED}" "Download failed—check network"; exit 1; }
   log "${GREEN}" "✅ Downloaded!"
 }
 
