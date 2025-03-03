@@ -1,7 +1,7 @@
 #!/bin/bash
 #
 # Tailscale Installation Script for Batocera Linux on Raspberry Pi
-# Version: 1.0.16-KeyAuth - Key-Based SSH with Dropbear
+# Version: 1.0.16-KeyAuth - Key-Based SSH with Dropbear, Debug
 # Hybrid with Configurable Hostname, Tag, and Reboot Countdown
 #
 
@@ -35,7 +35,7 @@ show_progress() {
 }
 
 # --- Configuration ---
-AUTH_KEY="${1:-}"  # Tailscale auth key
+AUTH_KEY="${1:-}"
 TAILSCALE_VERSION="1.80.2"
 DEFAULT_TAG="tag:ssh-batocera-1"
 
@@ -173,34 +173,20 @@ sysctl -p || true
 # --- Start Tailscale ---
 log "${BLUE}" "Starting Tailscale..."
 show_progress 2
-timeout 30s /userdata/system/tailscale/bin/tailscaled --state=/userdata/system/tailscale/tailscaled.state --socket=/run/tailscale/tailscaled.sock >> /userdata/system/tailscale/boot.log 2>&1 &
+/userdata/system/tailscale/bin/tailscaled --state=/userdata/system/tailscale/tailscaled.state --socket=/run/tailscale/tailscaled.sock >> /userdata/system/tailscale/boot.log 2>&1 &
+TAILSCALED_PID=$!
 sleep 15
-pgrep -f tailscaled || { log "${RED}" "tailscaled failed"; exit 1; }
-log "${GREEN}" "✅ tailscaled started"
-timeout 30s /userdata/system/tailscale/bin/tailscale up --advertise-routes=$SUBNET --snat-subnet-routes=false --accept-routes --authkey="$AUTH_KEY" --hostname="$HOSTNAME" --advertise-tags="$TAG" >> /userdata/system/tailscale/tailscale_up.log 2>&1 || { log "${RED}" "Tailscale up failed"; exit 1; }
+if ! ps -p $TAILSCALED_PID > /dev/null; then
+    log "${RED}" "ERROR: tailscaled failed to start—check logs"
+    cat /userdata/system/tailscale/boot.log
+    exit 1
+fi
+log "${GREEN}" "✅ tailscaled started (PID: $TAILSCALED_PID)"
+timeout 30s /userdata/system/tailscale/bin/tailscale up --advertise-routes=$SUBNET --snat-subnet-routes=false --accept-routes --authkey="$AUTH_KEY" --hostname="$HOSTNAME" --advertise-tags="$TAG" >> /userdata/system/tailscale/tailscale_up.log 2>&1 || { log "${RED}" "Tailscale up failed"; cat /userdata/system/tailscale/tailscale_up.log; exit 1; }
 log "${GREEN}" "✅ Tailscale up executed"
 
 TAILSCALE_IP=$(/userdata/system/tailscale/bin/tailscale ip -4 2>/dev/null)
-[ -z "$TAILSCALE_IP" ] && { log "${RED}" "No Tailscale IP"; exit 1; }
-
-# --- Persistence ---
-echo "$AUTH_KEY" > /userdata/system/tailscale/authkey
-chmod 600 /userdata/system/tailscale/authkey
-cat > /userdata/system/custom.sh <<EOF
-#!/bin/sh
-mkdir -p /dev/net
-[ ! -c /dev/net/tun ] && mknod /dev/net/tun c 10 200 && chmod 600 /dev/net/tun
-mkdir -p /run/tailscale
-echo "Starting Tailscale at \$(date)" >> /userdata/system/tailscale/boot.log
-if ! pgrep -f "/userdata/system/tailscale/bin/tailscaled" > /dev/null; then
-    /userdata/system/tailscale/bin/tailscaled --state=/userdata/system/tailscale/tailscaled.state --socket=/run/tailscale/tailscaled.sock >> /userdata/system/tailscale/boot.log 2>&1 &
-    sleep 15
-    export TS_AUTHKEY=\$(cat /userdata/system/tailscale/authkey)
-    /userdata/system/tailscale/bin/tailscale up --advertise-routes=$SUBNET --snat-subnet-routes=false --accept-routes --authkey="\$TS_AUTHKEY" --hostname="$HOSTNAME" --advertise-tags="$TAG" >> /userdata/system/tailscale/tailscale_up.log 2>&1
-    [ \$? -eq 0 ] && echo "Tailscale started successfully at \$(date)" >> /userdata/system/tailscale/boot.log || echo "Tailscale failed at \$(date)" >> /userdata/system/tailscale/boot.log
-fi
-EOF
-chmod +x /userdata/system/custom.sh
+[ -z "$TAILSCALE_IP" ] && { log "${RED}" "No Tailscale IP—check logs"; cat /userdata/system/tailscale/tailscale_up.log /userdata/system/tailscale/boot.log; exit 1; }
 
 # --- Verify ---
 log "${BLUE}" "Verifying installation..."
@@ -208,6 +194,9 @@ show_progress 1
 echo -e "${GREEN}Tailscale running at IP: $TAILSCALE_IP${NC}"
 /userdata/system/tailscale/bin/tailscale status
 ip a | grep tailscale0
+echo -e "${YELLOW}Check Tailscale logs if disconnected:${NC}"
+echo -e "${YELLOW}  cat /userdata/system/tailscale/boot.log${NC}"
+echo -e "${YELLOW}  cat /userdata/system/tailscale/tailscale_up.log${NC}"
 echo -e "${YELLOW}Test SSH with key: ssh -i <path-to-private-key> root@$TAILSCALE_IP${NC}"
 echo -e "${YELLOW}Note: Use 'dropbearconvert' to convert the private key to OpenSSH format${NC}"
 if [ "$AUTO_CONNECT" != "true" ]; then
