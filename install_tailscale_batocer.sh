@@ -2,7 +2,7 @@
 #
 # Tailscale Installation Script for Batocera Linux on Raspberry Pi
 # Version: 1.0.16 - Enhanced with Automation and Visual Feedback
-# Hybrid of Original 1.0.16 with Configurable Hostname and Tag
+# Hybrid with Configurable Hostname and Tag
 #
 
 # --- Color Definitions ---
@@ -107,6 +107,7 @@ fi
 [[ ! "$SUBNET" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}/[0-9]{1,2}$ ]] && { log "${RED}" "Invalid subnet format"; exit 1; }
 
 # --- Hostname Prompt ---
+unset HOSTNAME  # Clear any pre-existing hostname
 while [[ -z "$HOSTNAME" ]]; do
     read -r -p "Enter a hostname (e.g., batocera-test): " HOSTNAME
     [[ -z "$HOSTNAME" ]] && log "${RED}" "ERROR: Hostname cannot be empty"
