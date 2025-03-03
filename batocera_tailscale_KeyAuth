@@ -1,7 +1,7 @@
 #!/bin/bash
 #
 # Tailscale Installation Script for Batocera Linux on Raspberry Pi
-# Version: 1.0.16-KeyAuth - Key-Based SSH with Dropbear, No Restart
+# Version: 1.0.16-KeyAuth - Tailscale + Dropbear Key-Based SSH
 # Hybrid with Configurable Hostname, Tag, and Reboot Countdown
 #
 
@@ -38,14 +38,17 @@ show_progress() {
 AUTH_KEY="${1:-}"
 TAILSCALE_VERSION="1.80.2"
 DEFAULT_TAG="tag:ssh-batocera-1"
+SSH_DIR="/userdata/system/.ssh"
+AUTH_KEYS_FILE="$SSH_DIR/authorized_keys"
+PRIVATE_KEY_FILE="$SSH_DIR/id_dropbear"
 
 # --- Script Start ---
 clear
 echo -e "${PURPLE}=========================================================${NC}"
-echo -e "${PURPLE}    Tailscale Key-Based SSH Installer for Batocera     ${NC}"
+echo -e "${PURPLE}    Tailscale + Key-Based SSH Installer for Batocera     ${NC}"
 echo -e "${PURPLE}=========================================================${NC}"
 echo ""
-log "${BLUE}" "Starting Tailscale key-based SSH installation..."
+log "${BLUE}" "Starting Tailscale + key-based SSH installation..."
 
 # --- Root Check ---
 if [ "$(id -u)" -ne 0 ]; then
@@ -53,9 +56,13 @@ if [ "$(id -u)" -ne 0 ]; then
     exit 1
 fi
 
-# --- Check for batocera-save-overlay ---
+# --- Check Prerequisites ---
 if ! command -v batocera-save-overlay &> /dev/null; then
     log "${RED}" "ERROR: batocera-save-overlay not found"
+    exit 1
+fi
+if ! command -v dropbearkey &> /dev/null; then
+    log "${RED}" "ERROR: dropbearkey not found—required for key generation"
     exit 1
 fi
 
@@ -71,7 +78,7 @@ while [[ "$#" -gt 0 ]]; do
             pkill -f tailscaled 2>/dev/null && log "${GREEN}" "Stopped Tailscale"
             pkill dropbear 2>/dev/null && log "${GREEN}" "Stopped dropbear"
             [ -f /userdata/system/custom.sh ] && sed -i '/tailscale/d' /userdata/system/custom.sh
-            rm -rf /userdata/system/tailscale /root/.ssh
+            rm -rf /userdata/system/tailscale /userdata/system/.ssh
             batocera-save-overlay && log "${GREEN}" "Uninstalled—rebooting" || log "${RED}" "Overlay save failed"
             reboot
             exit 0
@@ -130,19 +137,23 @@ fi
 # --- Generate Dropbear SSH Key Pair ---
 log "${BLUE}" "Generating SSH key pair with dropbearkey..."
 show_progress 1
-mkdir -p /root/.ssh
-if [ ! -f /root/.ssh/id_dropbear ]; then
-    dropbearkey -t ed25519 -f /root/.ssh/id_dropbear > /tmp/dropbear_key_output 2>&1
-    dropbearkey -y -f /root/.ssh/id_dropbear | grep "^ssh-" > /root/.ssh/authorized_keys
+mkdir -p "$SSH_DIR"
+chmod 700 "$SSH_DIR"
+if [ ! -f "$PRIVATE_KEY_FILE" ]; then
+    dropbearkey -t ed25519 -f "$PRIVATE_KEY_FILE" > /tmp/dropbear_key_output 2>&1 || { log "${RED}" "ERROR: Failed to generate key"; cat /tmp/dropbear_key_output; exit 1; }
+    dropbearkey -y -f "$PRIVATE_KEY_FILE" | grep "^ssh-" > "$AUTH_KEYS_FILE" || { log "${RED}" "ERROR: Failed to extract public key"; exit 1; }
     log "${GREEN}" "✅ SSH key pair generated"
 else
     log "${YELLOW}" "SSH key pair exists—using existing keys"
-    dropbearkey -y -f /root/.ssh/id_dropbear | grep "^ssh-" > /root/.ssh/authorized_keys
+    dropbearkey -y -f "$PRIVATE_KEY_FILE" | grep "^ssh-" > "$AUTH_KEYS_FILE" || { log "${RED}" "ERROR: Failed to extract public key"; exit 1; }
 fi
-chmod 600 /root/.ssh/authorized_keys
-log "${GREEN}" "✅ Public key added to authorized_keys"
-echo -e "${YELLOW}Save this private key (convert to OpenSSH format for PowerShell/Tailscale):${NC}"
-dropbearkey -y -f /root/.ssh/id_dropbear
+chmod 600 "$AUTH_KEYS_FILE" || { log "${RED}" "ERROR: Failed to set permissions on authorized_keys"; exit 1; }
+chmod 600 "$PRIVATE_KEY_FILE" || { log "${RED}" "ERROR: Failed to set permissions on private key"; exit 1; }
+log "${GREEN}" "✅ Public key added—key auth enabled on reboot"
+echo -e "${YELLOW}Save this private key (convert to OpenSSH format):${NC}"
+dropbearkey -y -f "$PRIVATE_KEY_FILE" || { log "${RED}" "ERROR: Failed to display key"; exit 1; }
+echo -e "${YELLOW}Run on a system with dropbear tools:${NC}"
+echo -e "${YELLOW}  dropbearconvert dropbear openssh $PRIVATE_KEY_FILE <output-file>${NC}"
 
 # --- Installation Steps ---
 log "${BLUE}" "📥 Installing Tailscale..."
@@ -190,11 +201,12 @@ show_progress 1
 echo -e "${GREEN}Tailscale running at IP: $TAILSCALE_IP${NC}"
 /userdata/system/tailscale/bin/tailscale status
 ip a | grep tailscale0
-echo -e "${YELLOW}Test SSH with key: ssh -i <path-to-private-key> root@$TAILSCALE_IP${NC}"
-echo -e "${YELLOW}Note: Use 'dropbearconvert' to convert the private key to OpenSSH format${NC}"
+echo -e "${YELLOW}Test SSH with key post-reboot: ssh -i <path-to-converted-key> root@$TAILSCALE_IP${NC}"
+echo -e "${YELLOW}Note: Current session uses password; reboot enables key-only auth${NC}"
+echo -e "${YELLOW}Convert key with: dropbearconvert dropbear openssh $PRIVATE_KEY_FILE <output-file>${NC}"
 if [ "$AUTO_CONNECT" != "true" ]; then
-    while true; do read -r -p "Did SSH work with key? (yes/no): " SSH_CONFIRM; [[ "$SSH_CONFIRM" =~ ^(yes|no)$ ]] && break; echo "Please enter 'yes' or 'no'"; done
-    [[ "$SSH_CONFIRM" == "no" ]] && { log "${RED}" "SSH failed—check key setup"; exit 1; }
+    while true; do read -r -p "Proceed to save and reboot? (yes/no): " REBOOT_CONFIRM; [[ "$REBOOT_CONFIRM" =~ ^(yes|no)$ ]] && break; echo "Please enter 'yes' or 'no'"; done
+    [[ "$REBOOT_CONFIRM" == "no" ]] && { log "${YELLOW}" "Not rebooting—test SSH manually after reboot"; exit 0; }
 fi
 
 # --- Save Overlay with Countdown ---
@@ -206,4 +218,7 @@ for i in 5 4 3 2 1; do
     echo -e "${YELLOW}Rebooting in $i...${NC}"
     sleep 1
 done
+# Restart dropbear with -s to disable password auth
+pkill dropbear 2>/dev/null && log "${GREEN}" "Stopped dropbear for key-only auth on reboot"
+dropbear -s &>/dev/null &
 reboot
