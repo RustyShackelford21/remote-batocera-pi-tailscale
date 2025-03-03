@@ -78,7 +78,7 @@ while [[ "$#" -gt 0 ]]; do
             pkill -f tailscaled 2>/dev/null && log "${GREEN}" "Stopped Tailscale"
             pkill dropbear 2>/dev/null && log "${GREEN}" "Stopped dropbear"
             [ -f /userdata/system/custom.sh ] && sed -i '/tailscale/d' /userdata/system/custom.sh
-            rm -rf /userdata/system/tailscale /userdata/system/.ssh
+            rm -rf /userdata/system/tailscale "$SSH_DIR"
             batocera-save-overlay && log "${GREEN}" "Uninstalled—rebooting" || log "${RED}" "Overlay save failed"
             reboot
             exit 0
@@ -182,18 +182,59 @@ grep -q "net.ipv4.ip_forward = 1" /etc/sysctl.conf || echo 'net.ipv4.ip_forward 
 grep -q "net.ipv6.conf.all.forwarding = 1" /etc/sysctl.conf || echo 'net.ipv6.conf.all.forwarding = 1' >> /etc/sysctl.conf
 sysctl -p || true
 
-# --- Start Tailscale ---
-log "${BLUE}" "Starting Tailscale..."
+# --- Start Tailscale and Write custom.sh ---
+log "${BLUE}" "Starting Tailscale and configuring custom.sh..."
 show_progress 2
 timeout 30s /userdata/system/tailscale/bin/tailscaled --state=/userdata/system/tailscale/tailscaled.state --socket=/run/tailscale/tailscaled.sock >> /userdata/system/tailscale/boot.log 2>&1 &
 sleep 15
 pgrep -f tailscaled || { log "${RED}" "tailscaled failed"; cat /userdata/system/tailscale/boot.log; exit 1; }
 log "${GREEN}" "✅ tailscaled started"
-timeout 30s /userdata/system/tailscale/bin/tailscale up --advertise-routes=$SUBNET --snat-subnet-routes=false --accept-routes --authkey="$AUTH_KEY" --hostname="$HOSTNAME" --advertise-tags="$TAG" >> /userdata/system/tailscale/tailscale_up.log 2>&1 || { log "${RED}" "Tailscale up failed"; cat /userdata/system/tailscale/tailscale_up.log; exit 1; }
+timeout 30s /userdata/system/tailscale/bin/tailscale up --advertise-routes="$SUBNET" --snat-subnet-routes=false --accept-routes --authkey="$AUTH_KEY" --hostname="$HOSTNAME" --advertise-tags="$TAG" >> /userdata/system/tailscale/tailscale_up.log 2>&1 || { log "${RED}" "Tailscale up failed"; cat /userdata/system/tailscale/tailscale_up.log; exit 1; }
 log "${GREEN}" "✅ Tailscale up executed"
 
 TAILSCALE_IP=$(/userdata/system/tailscale/bin/tailscale ip -4 2>/dev/null)
 [ -z "$TAILSCALE_IP" ] && { log "${RED}" "No Tailscale IP"; cat /userdata/system/tailscale/tailscale_up.log /userdata/system/tailscale/boot.log; exit 1; }
+
+# --- Write custom.sh ---
+cat > /userdata/system/custom.sh <<EOF
+#!/bin/sh
+# --- Logging ---
+LOG="/userdata/system/tailscale/tailscale_custom.log"
+log() { echo "[\$(date '+%Y-%m-%d %H:%M:%S')] \$1" >> "\$LOG"; }
+
+log "custom.sh started"
+
+# --- Ensure Tailscale ---
+if ! pgrep -f "/userdata/system/tailscale/bin/tailscaled" > /dev/null; then
+    log "Starting tailscaled..."
+    mkdir -p /dev/net
+    [ ! -c /dev/net/tun ] && mknod /dev/net/tun c 10 200 && chmod 600 /dev/net/tun
+    mkdir -p /run/tailscale
+    /userdata/system/tailscale/bin/tailscaled --state=/userdata/system/tailscale/tailscaled.state --socket=/run/tailscale/tailscaled.sock >> /userdata/system/tailscale/boot.log 2>&1 &
+    for i in {1..30}; do
+        [ -S /run/tailscale/tailscaled.sock ] && break
+        sleep 1
+    done
+    [ ! -S /run/tailscale/tailscaled.sock ] && { log "ERROR: tailscaled socket not found"; exit 1; }
+    log "Running tailscale up..."
+    AUTH_KEY=\$(cat /userdata/system/tailscale/authkey 2>/dev/null || echo "$AUTH_KEY")
+    /userdata/system/tailscale/bin/tailscale up --advertise-routes="$SUBNET" --snat-subnet-routes=false --accept-routes --authkey="\$AUTH_KEY" --hostname="$HOSTNAME" --advertise-tags="$TAG" >> /userdata/system/tailscale/tailscale_up.log 2>&1
+    [ \$? -eq 0 ] || { log "ERROR: tailscale up failed—see tailscale_up.log"; exit 1; }
+else
+    log "tailscaled already running"
+fi
+
+# --- Force Dropbear Key-Only Auth ---
+log "Configuring Dropbear for key-only auth..."
+pkill dropbear 2>/dev/null
+dropbear -s &>/dev/null &
+sleep 1
+pgrep dropbear || { log "ERROR: Dropbear failed to start"; exit 1; }
+log "custom.sh finished"
+EOF
+chmod +x /userdata/system/custom.sh || { log "${RED}" "ERROR: Failed to set custom.sh permissions"; exit 1; }
+echo "$AUTH_KEY" > /userdata/system/tailscale/authkey
+chmod 600 /userdata/system/tailscale/authkey
 
 # --- Verify ---
 log "${BLUE}" "Verifying installation..."
@@ -201,9 +242,9 @@ show_progress 1
 echo -e "${GREEN}Tailscale running at IP: $TAILSCALE_IP${NC}"
 /userdata/system/tailscale/bin/tailscale status
 ip a | grep tailscale0
-echo -e "${YELLOW}Test SSH with key post-reboot: ssh -i <path-to-converted-key> root@$TAILSCALE_IP${NC}"
+echo -e "${YELLOW}Test SSH post-reboot: ssh -i <path-to-converted-key> root@$TAILSCALE_IP${NC}"
 echo -e "${YELLOW}Note: Current session uses password; reboot enables key-only auth${NC}"
-echo -e "${YELLOW}Convert key with: dropbearconvert dropbear openssh $PRIVATE_KEY_FILE <output-file>${NC}"
+echo -e "${YELLOW}Convert key: dropbearconvert dropbear openssh $PRIVATE_KEY_FILE <output-file>${NC}"
 if [ "$AUTO_CONNECT" != "true" ]; then
     while true; do read -r -p "Proceed to save and reboot? (yes/no): " REBOOT_CONFIRM; [[ "$REBOOT_CONFIRM" =~ ^(yes|no)$ ]] && break; echo "Please enter 'yes' or 'no'"; done
     [[ "$REBOOT_CONFIRM" == "no" ]] && { log "${YELLOW}" "Not rebooting—test SSH manually after reboot"; exit 0; }
@@ -218,7 +259,4 @@ for i in 5 4 3 2 1; do
     echo -e "${YELLOW}Rebooting in $i...${NC}"
     sleep 1
 done
-# Restart dropbear with -s to disable password auth
-pkill dropbear 2>/dev/null && log "${GREEN}" "Stopped dropbear for key-only auth on reboot"
-dropbear -s &>/dev/null &
 reboot
