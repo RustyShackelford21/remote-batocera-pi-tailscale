@@ -36,7 +36,7 @@ fi
 
 # --- User Confirmation ---
 if [ -z "$CONFIRM_INSTALL" ] || [ "$CONFIRM_INSTALL" != "yes" ]; then
-    read -r -p "This script will install and configure Tailscale on your Batocera system with local SSH access. Continue? (yes/no): " CONFIRM
+    read -r -p "This script will install Tailscale and enable local SSH on your Batocera system. Continue? (yes/no): " CONFIRM
     if [[ "$CONFIRM" != "yes" ]]; then
         echo -e "${RED}❌ Installation cancelled by user.${NC}"
         exit 1
@@ -202,12 +202,50 @@ fi
 # --- Enable Local SSH ---
 echo -e "${YELLOW}Configuring local SSH access...${NC}"
 iptables -F  # Clear existing rules to avoid conflicts
+iptables -P INPUT ACCEPT  # Set default policy to ACCEPT during setup
 iptables -A INPUT -i wlan0 -p tcp --dport 22 -j ACCEPT
 iptables-save > /userdata/system/iptables.rules
 
-# --- Verify Tailscale is Running ---
+# --- Write custom.sh for reboot persistence ---
+cat <<EOF > /userdata/system/custom.sh
+#!/bin/sh
+# Ensure /dev/net and /dev/net/tun exist
+mkdir -p /dev/net
+if [ ! -c /dev/net/tun ]; then
+    mknod /dev/net/tun c 10 200
+    chmod 600 /dev/net/tun
+fi
+# Ensure /run/tailscale exists
+mkdir -p /run/tailscale
+echo "Starting Tailscale at \$(date)" >> /userdata/system/tailscale/boot.log
+
+# Ensure local SSH access
+iptables -F
+iptables -P INPUT ACCEPT
+iptables -A INPUT -i wlan0 -p tcp --dport 22 -j ACCEPT
+
+if ! pgrep -f "/userdata/system/tailscale/bin/tailscaled" > /dev/null; then
+    /userdata/system/tailscale/bin/tailscaled --state=/userdata/system/tailscale/tailscaled.state --socket=/run/tailscale/tailscaled.sock >> /userdata/system/tailscale/boot.log 2>&1 &
+    sleep 15  # Give tailscaled time to start
+    if [ ! -f /userdata/system/tailscale/authkey ]; then
+        cp /userdata/system/tailscale/authkey.bak /userdata/system/tailscale/authkey
+    fi
+    export TS_AUTHKEY=\$(cat /userdata/system/tailscale/authkey)
+    /userdata/system/tailscale/bin/tailscale up --advertise-routes=$SUBNET --snat-subnet-routes=false --accept-routes --authkey="\$TS_AUTHKEY" --hostname="$HOSTNAME" --advertise-tags=tag:ssh-batocera-1 >> /userdata/system/tailscale/tailscale_up.log 2>&1
+    if [ \$? -ne 0 ]; then
+        echo "Tailscale failed to start at \$(date). Check log file." >> /userdata/system/tailscale/tailscale_up.log
+        cat /userdata/system/tailscale/tailscale_up.log >> /userdata/system/tailscale/boot.log
+        exit 1
+    else
+        echo "Tailscale started successfully at \$(date)" >> /userdata/system/tailscale/boot.log
+    fi
+fi
+EOF
+chmod +x /userdata/system/custom.sh || { echo -e "${RED}ERROR: Failed to set custom.sh permissions.${NC}"; exit 1; }
+
+# --- Verify Tailscale and Local SSH ---
 echo -e "${GREEN}------------------------------------------------------------------------${NC}"
-echo -e "${GREEN}Verifying Tailscale installation...${NC}"
+echo -e "${GREEN}Verifying Tailscale and SSH installation...${NC}"
 echo -e "${GREEN}------------------------------------------------------------------------${NC}"
 echo -e "${GREEN}Tailscale is running with IP: $TAILSCALE_IP${NC}"
 
@@ -215,10 +253,21 @@ echo -e "${GREEN}Tailscale is running with IP: $TAILSCALE_IP${NC}"
 /userdata/system/tailscale/bin/tailscale status
 ip a | grep tailscale0
 
+# Test local SSH from the device itself
+LOCAL_IP=$(ip -4 addr show wlan0 | grep -oP '(?<=inet\s)\d+(\.\d+){3}')
+if ssh root@$LOCAL_IP -o ConnectTimeout=5 </dev/null 2>/dev/null; then
+    echo -e "${GREEN}✅ Local SSH to $LOCAL_IP works from this device${NC}"
+else
+    echo -e "${RED}ERROR: Local SSH to $LOCAL_IP failed from this device. Check SSH service and firewall:${NC}"
+    netstat -tuln | grep :22 || echo "SSH not listening on port 22"
+    iptables -L -v -n | grep 22 || echo "No iptables rule for port 22"
+    exit 1
+fi
+
 echo -e "${YELLOW}Test SSH now via Tailscale IP from another device:${NC}"
 echo -e "${YELLOW}    ssh root@$TAILSCALE_IP${NC}"
-echo -e "${YELLOW}Then, from a device on the same LAN (192.168.50.x), test local SSH:${NC}"
-echo -e "${YELLOW}    ssh root@192.168.50.5${NC}"
+echo -e "${YELLOW}Then, from a device on the same LAN ($SUBNET), test local SSH:${NC}"
+echo -e "${YELLOW}    ssh root@$LOCAL_IP${NC}"
 while true; do
     read -r -p "Did both SSH tests work? (yes/no): " SSH_CONFIRM
     if [[ "$SSH_CONFIRM" == "yes" ]]; then
@@ -243,38 +292,6 @@ while true; do
     fi
 done
 
-# --- Write custom.sh for reboot persistence ---
-cat <<EOF > /userdata/system/custom.sh
-#!/bin/sh
-# Ensure /dev/net and /dev/net/tun exist
-mkdir -p /dev/net
-if [ ! -c /dev/net/tun ]; then
-    mknod /dev/net/tun c 10 200
-    chmod 600 /dev/net/tun
-fi
-# Ensure /run/tailscale exists
-mkdir -p /run/tailscale
-echo "Starting Tailscale at \$(date)" >> /userdata/system/tailscale/boot.log
-
-if ! pgrep -f "/userdata/system/tailscale/bin/tailscaled" > /dev/null; then
-    /userdata/system/tailscale/bin/tailscaled --state=/userdata/system/tailscale/tailscaled.state --socket=/run/tailscale/tailscaled.sock >> /userdata/system/tailscale/boot.log 2>&1 &
-    sleep 15  # Give tailscaled time to start
-    if [ ! -f /userdata/system/tailscale/authkey ]; then
-        cp /userdata/system/tailscale/authkey.bak /userdata/system/tailscale/authkey
-    fi
-    export TS_AUTHKEY=\$(cat /userdata/system/tailscale/authkey)
-    /userdata/system/tailscale/bin/tailscale up --advertise-routes=$SUBNET --snat-subnet-routes=false --accept-routes --authkey="\$TS_AUTHKEY" --hostname="$HOSTNAME" --advertise-tags=tag:ssh-batocera-1 >> /userdata/system/tailscale/tailscale_up.log 2>&1
-    if [ \$? -ne 0 ]; then
-        echo "Tailscale failed to start at \$(date). Check log file." >> /userdata/system/tailscale/tailscale_up.log
-        cat /userdata/system/tailscale/tailscale_up.log >> /userdata/system/tailscale/boot.log
-        exit 1
-    else
-        echo "Tailscale started successfully at \$(date)" >> /userdata/system/tailscale/boot.log
-    fi
-fi
-EOF
-chmod +x /userdata/system/custom.sh || { echo -e "${RED}ERROR: Failed to set custom.sh permissions.${NC}"; exit 1; }
-
 echo -e "${GREEN}------------------------------------------------------------------------${NC}"
 echo -e "${GREEN}Tailscale and local SSH installation verified!${NC}"
 read -r -p "Save changes and reboot? THIS IS IRREVERSIBLE (yes/no): " SAVE_CHANGES
@@ -288,7 +305,7 @@ EOF
     if command -v batocera-services &> /dev/null; then
         batocera-services enable iptablesload
     else
-        echo -e "${YELLOW}WARNING: batocera-services not found. iptables rules may not persist across reboots.${NC}"
+        echo -e "${YELLOW}WARNING: batocera-services not found. Using custom.sh to ensure SSH persistence.${NC}"
     fi
 
     echo -e "${YELLOW}💾 Saving overlay...${NC}"
