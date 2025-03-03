@@ -1,7 +1,7 @@
 #!/bin/bash
 #
 # Tailscale Installation Script for Batocera Linux on Raspberry Pi
-# Version: 1.0.16-KeyAuth - Key-Based SSH with Dropbear, Debug
+# Version: 1.0.16-KeyAuth - Key-Based SSH with Dropbear, No Restart
 # Hybrid with Configurable Hostname, Tag, and Reboot Countdown
 #
 
@@ -69,6 +69,7 @@ while [[ "$#" -gt 0 ]]; do
         --uninstall)
             log "${YELLOW}" "Uninstalling Tailscale and SSH keys..."
             pkill -f tailscaled 2>/dev/null && log "${GREEN}" "Stopped Tailscale"
+            pkill dropbear 2>/dev/null && log "${GREEN}" "Stopped dropbear"
             [ -f /userdata/system/custom.sh ] && sed -i '/tailscale/d' /userdata/system/custom.sh
             rm -rf /userdata/system/tailscale /root/.ssh
             batocera-save-overlay && log "${GREEN}" "Uninstalled—rebooting" || log "${RED}" "Overlay save failed"
@@ -173,20 +174,15 @@ sysctl -p || true
 # --- Start Tailscale ---
 log "${BLUE}" "Starting Tailscale..."
 show_progress 2
-/userdata/system/tailscale/bin/tailscaled --state=/userdata/system/tailscale/tailscaled.state --socket=/run/tailscale/tailscaled.sock >> /userdata/system/tailscale/boot.log 2>&1 &
-TAILSCALED_PID=$!
+timeout 30s /userdata/system/tailscale/bin/tailscaled --state=/userdata/system/tailscale/tailscaled.state --socket=/run/tailscale/tailscaled.sock >> /userdata/system/tailscale/boot.log 2>&1 &
 sleep 15
-if ! ps -p $TAILSCALED_PID > /dev/null; then
-    log "${RED}" "ERROR: tailscaled failed to start—check logs"
-    cat /userdata/system/tailscale/boot.log
-    exit 1
-fi
-log "${GREEN}" "✅ tailscaled started (PID: $TAILSCALED_PID)"
+pgrep -f tailscaled || { log "${RED}" "tailscaled failed"; cat /userdata/system/tailscale/boot.log; exit 1; }
+log "${GREEN}" "✅ tailscaled started"
 timeout 30s /userdata/system/tailscale/bin/tailscale up --advertise-routes=$SUBNET --snat-subnet-routes=false --accept-routes --authkey="$AUTH_KEY" --hostname="$HOSTNAME" --advertise-tags="$TAG" >> /userdata/system/tailscale/tailscale_up.log 2>&1 || { log "${RED}" "Tailscale up failed"; cat /userdata/system/tailscale/tailscale_up.log; exit 1; }
 log "${GREEN}" "✅ Tailscale up executed"
 
 TAILSCALE_IP=$(/userdata/system/tailscale/bin/tailscale ip -4 2>/dev/null)
-[ -z "$TAILSCALE_IP" ] && { log "${RED}" "No Tailscale IP—check logs"; cat /userdata/system/tailscale/tailscale_up.log /userdata/system/tailscale/boot.log; exit 1; }
+[ -z "$TAILSCALE_IP" ] && { log "${RED}" "No Tailscale IP"; cat /userdata/system/tailscale/tailscale_up.log /userdata/system/tailscale/boot.log; exit 1; }
 
 # --- Verify ---
 log "${BLUE}" "Verifying installation..."
@@ -194,9 +190,6 @@ show_progress 1
 echo -e "${GREEN}Tailscale running at IP: $TAILSCALE_IP${NC}"
 /userdata/system/tailscale/bin/tailscale status
 ip a | grep tailscale0
-echo -e "${YELLOW}Check Tailscale logs if disconnected:${NC}"
-echo -e "${YELLOW}  cat /userdata/system/tailscale/boot.log${NC}"
-echo -e "${YELLOW}  cat /userdata/system/tailscale/tailscale_up.log${NC}"
 echo -e "${YELLOW}Test SSH with key: ssh -i <path-to-private-key> root@$TAILSCALE_IP${NC}"
 echo -e "${YELLOW}Note: Use 'dropbearconvert' to convert the private key to OpenSSH format${NC}"
 if [ "$AUTO_CONNECT" != "true" ]; then
