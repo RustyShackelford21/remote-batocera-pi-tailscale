@@ -2,7 +2,7 @@
 #
 # Tailscale Installation Script for Batocera Linux on Raspberry Pi
 # Version: 1.0.16 - Enhanced with Automation and Visual Feedback
-# Hybrid of Original 1.0.16 and User-Enhanced Script
+# Hybrid of Original 1.0.16 with Configurable Hostname and Tag
 #
 
 # --- Color Definitions ---
@@ -37,6 +37,7 @@ show_progress() {
 # --- Configuration ---
 AUTH_KEY="${1:-}"  # Use $1 if provided, otherwise prompt later
 TAILSCALE_VERSION="1.80.2"  # Fixed to match 1.0.16's stable version
+DEFAULT_TAG="tag:ssh-batocera-1"  # Default tag, configurable
 
 # --- Script Start ---
 clear
@@ -106,15 +107,19 @@ fi
 [[ ! "$SUBNET" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}/[0-9]{1,2}$ ]] && { log "${RED}" "Invalid subnet format"; exit 1; }
 
 # --- Hostname Prompt ---
-if [ "$AUTO_CONNECT" != "true" ]; then
-    while [[ -z "$HOSTNAME" ]]; do
-        read -r -p "Enter a hostname (e.g., batocera-test): " HOSTNAME
-        [[ -z "$HOSTNAME" ]] && log "${RED}" "ERROR: Hostname cannot be empty"
-    done
-else
-    HOSTNAME="batocera-test"  # Default for automation
-fi
+while [[ -z "$HOSTNAME" ]]; do
+    read -r -p "Enter a hostname (e.g., batocera-test): " HOSTNAME
+    [[ -z "$HOSTNAME" ]] && log "${RED}" "ERROR: Hostname cannot be empty"
+done
 log "${GREEN}" "✅ Using hostname: $HOSTNAME"
+
+# --- Tag Prompt ---
+TAG="$DEFAULT_TAG"
+if [ "$AUTO_CONNECT" != "true" ]; then
+    read -r -p "Enter Tailscale tag (default: $DEFAULT_TAG, press Enter to accept): " USER_TAG
+    [ -n "$USER_TAG" ] && TAG="$USER_TAG"
+fi
+log "${GREEN}" "✅ Using tag: $TAG"
 
 # --- Check for Auth Key ---
 if [[ -z "$AUTH_KEY" ]]; then
@@ -157,7 +162,7 @@ timeout 30s /userdata/system/tailscale/bin/tailscaled --state=/userdata/system/t
 sleep 15
 pgrep -f tailscaled || { log "${RED}" "tailscaled failed"; exit 1; }
 log "${GREEN}" "✅ tailscaled started"
-timeout 30s /userdata/system/tailscale/bin/tailscale up --advertise-routes=$SUBNET --snat-subnet-routes=false --accept-routes --authkey="$AUTH_KEY" --hostname="$HOSTNAME" --advertise-tags=tag:ssh-batocera-1 >> /userdata/system/tailscale/tailscale_up.log 2>&1 || { log "${RED}" "Tailscale up failed"; exit 1; }
+timeout 30s /userdata/system/tailscale/bin/tailscale up --advertise-routes=$SUBNET --snat-subnet-routes=false --accept-routes --authkey="$AUTH_KEY" --hostname="$HOSTNAME" --advertise-tags="$TAG" >> /userdata/system/tailscale/tailscale_up.log 2>&1 || { log "${RED}" "Tailscale up failed"; exit 1; }
 log "${GREEN}" "✅ Tailscale up executed"
 
 TAILSCALE_IP=$(/userdata/system/tailscale/bin/tailscale ip -4 2>/dev/null)
@@ -176,7 +181,7 @@ if ! pgrep -f "/userdata/system/tailscale/bin/tailscaled" > /dev/null; then
     /userdata/system/tailscale/bin/tailscaled --state=/userdata/system/tailscale/tailscaled.state --socket=/run/tailscale/tailscaled.sock >> /userdata/system/tailscale/boot.log 2>&1 &
     sleep 15
     export TS_AUTHKEY=\$(cat /userdata/system/tailscale/authkey)
-    /userdata/system/tailscale/bin/tailscale up --advertise-routes=$SUBNET --snat-subnet-routes=false --accept-routes --authkey="\$TS_AUTHKEY" --hostname="$HOSTNAME" --advertise-tags=tag:ssh-batocera-1 >> /userdata/system/tailscale/tailscale_up.log 2>&1
+    /userdata/system/tailscale/bin/tailscale up --advertise-routes=$SUBNET --snat-subnet-routes=false --accept-routes --authkey="\$TS_AUTHKEY" --hostname="$HOSTNAME" --advertise-tags="$TAG" >> /userdata/system/tailscale/tailscale_up.log 2>&1
     [ \$? -eq 0 ] && echo "Tailscale started successfully at \$(date)" >> /userdata/system/tailscale/boot.log || echo "Tailscale failed at \$(date)" >> /userdata/system/tailscale/boot.log
 fi
 EOF
