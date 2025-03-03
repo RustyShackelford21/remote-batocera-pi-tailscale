@@ -1,5 +1,5 @@
 #!/bin/bash
-# Version: 1.0.16 - March 3, 2025
+# Version: 1.0.17 - March 3, 2025
 
 # --- Configuration ---
 AUTH_KEY="${1:-}"  # Use $1 if provided, otherwise prompt
@@ -36,7 +36,7 @@ fi
 
 # --- User Confirmation ---
 if [ -z "$CONFIRM_INSTALL" ] || [ "$CONFIRM_INSTALL" != "yes" ]; then
-    read -r -p "This script will install and configure Tailscale on your Batocera system. Continue? (yes/no): " CONFIRM
+    read -r -p "This script will install and configure Tailscale on your Batocera system with local SSH access. Continue? (yes/no): " CONFIRM
     if [[ "$CONFIRM" != "yes" ]]; then
         echo -e "${RED}❌ Installation cancelled by user.${NC}"
         exit 1
@@ -199,6 +199,11 @@ if [ -z "$TAILSCALE_IP" ]; then
     exit 1
 fi
 
+# --- Enable Local SSH ---
+echo -e "${YELLOW}Configuring local SSH access...${NC}"
+iptables -A INPUT -i wlan0 -p tcp --dport 22 -j ACCEPT
+iptables-save > /userdata/system/iptables.rules
+
 # --- Verify Tailscale is Running ---
 echo -e "${GREEN}------------------------------------------------------------------------${NC}"
 echo -e "${GREEN}Verifying Tailscale installation...${NC}"
@@ -209,10 +214,12 @@ echo -e "${GREEN}Tailscale is running with IP: $TAILSCALE_IP${NC}"
 /userdata/system/tailscale/bin/tailscale status
 ip a | grep tailscale0
 
-echo -e "${YELLOW}Test SSH now from another device on your Tailscale network:${NC}"
+echo -e "${YELLOW}Test SSH now via Tailscale IP from another device:${NC}"
 echo -e "${YELLOW}    ssh root@$TAILSCALE_IP${NC}"
+echo -e "${YELLOW}Then, from this device, test local SSH:${NC}"
+echo -e "${YELLOW}    ssh root@192.168.50.5${NC}"
 while true; do
-    read -r -p "Did SSH work? (yes/no): " SSH_CONFIRM
+    read -r -p "Did both SSH tests work? (yes/no): " SSH_CONFIRM
     if [[ "$SSH_CONFIRM" == "yes" ]]; then
         break
     elif [[ "$SSH_CONFIRM" == "no" ]]; then
@@ -268,11 +275,9 @@ EOF
 chmod +x /userdata/system/custom.sh || { echo -e "${RED}ERROR: Failed to set custom.sh permissions.${NC}"; exit 1; }
 
 echo -e "${GREEN}------------------------------------------------------------------------${NC}"
-echo -e "${GREEN}Tailscale installation and SSH verified!${NC}"
+echo -e "${GREEN}Tailscale and local SSH installation verified!${NC}"
 read -r -p "Save changes and reboot? THIS IS IRREVERSIBLE (yes/no): " SAVE_CHANGES
 if [[ "$SAVE_CHANGES" == "yes" ]]; then
-    iptables-save | grep -v "100.64.0.0/10" | iptables-restore || { echo -e "${RED}ERROR: Failed to update iptables rules.${NC}"; exit 1; }
-    iptables-save > /userdata/system/iptables.rules
     mkdir -p /userdata/system/services
     cat <<EOF > /userdata/system/services/iptablesload.sh
 #!/bin/bash
