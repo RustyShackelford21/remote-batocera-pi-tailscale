@@ -1,5 +1,5 @@
 #!/bin/bash
-# Version: 1.0.17 - March 3, 2025
+# Version: 1.0.18 - March 3, 2025
 
 # --- Configuration ---
 AUTH_KEY="${1:-}"  # Use $1 if provided, otherwise prompt
@@ -201,6 +201,7 @@ fi
 
 # --- Enable Local SSH ---
 echo -e "${YELLOW}Configuring local SSH access...${NC}"
+iptables -F  # Clear existing rules to avoid conflicts
 iptables -A INPUT -i wlan0 -p tcp --dport 22 -j ACCEPT
 iptables-save > /userdata/system/iptables.rules
 
@@ -216,7 +217,7 @@ ip a | grep tailscale0
 
 echo -e "${YELLOW}Test SSH now via Tailscale IP from another device:${NC}"
 echo -e "${YELLOW}    ssh root@$TAILSCALE_IP${NC}"
-echo -e "${YELLOW}Then, from this device, test local SSH:${NC}"
+echo -e "${YELLOW}Then, from a device on the same LAN (192.168.50.x), test local SSH:${NC}"
 echo -e "${YELLOW}    ssh root@192.168.50.5${NC}"
 while true; do
     read -r -p "Did both SSH tests work? (yes/no): " SSH_CONFIRM
