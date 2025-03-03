@@ -1,7 +1,7 @@
 #!/bin/bash
 #
 # Tailscale Installation Script for Batocera Linux on Raspberry Pi
-# Version: 1.0.16 - Enhanced with Automation and Visual Feedback
+# Version: 1.0.16 - Enhanced with Automation, Visual Feedback, and Reboot Countdown
 # Hybrid with Configurable Hostname and Tag
 #
 
@@ -200,9 +200,13 @@ if [ "$AUTO_CONNECT" != "true" ]; then
     [[ "$SSH_CONFIRM" == "no" ]] && { log "${RED}" "SSH failed—check logs"; exit 1; }
 fi
 
-# --- Save Overlay ---
+# --- Save Overlay with Countdown ---
 log "${BLUE}" "Saving overlay..."
 show_progress 1
 batocera-save-overlay || { log "${RED}" "Overlay save failed"; exit 1; }
-log "${GREEN}" "✅ Installation complete—rebooting!"
+log "${GREEN}" "✅ Installation complete—rebooting in 5 seconds..."
+for i in 5 4 3 2 1; do
+    echo -e "${YELLOW}Rebooting in $i...${NC}"
+    sleep 1
+done
 reboot
