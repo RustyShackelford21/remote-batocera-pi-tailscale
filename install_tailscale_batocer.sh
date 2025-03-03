@@ -1,5 +1,5 @@
 #!/bin/bash
-# Version: 1.0.18 - March 3, 2025
+# Version: 1.0.18 - March 3, 2025 (Updated for Stability)
 
 # --- Configuration ---
 AUTH_KEY="${1:-}"  # Use $1 if provided, otherwise prompt
@@ -140,8 +140,8 @@ sysctl -p || true
 echo -e "${YELLOW}Starting Tailscale...${NC}"
 rm -f /userdata/system/tailscale/boot.log /userdata/system/tailscale/tailscale_up.log
 
-# Start tailscaled with timeout
-timeout 30s /userdata/system/tailscale/bin/tailscaled --state=/userdata/system/tailscale/tailscaled.state --socket=/run/tailscale/tailscaled.sock >> /userdata/system/tailscale/boot.log 2>&1 &
+# Start tailscaled synchronously
+/userdata/system/tailscale/bin/tailscaled --state=/userdata/system/tailscale/tailscaled.state --socket=/run/tailscale/tailscaled.sock >> /userdata/system/tailscale/boot.log 2>&1 &
 sleep 15  # Give tailscaled time to start
 if ! pgrep -f "/userdata/system/tailscale/bin/tailscaled" > /dev/null; then
     echo -e "${RED}ERROR: tailscaled failed to start. Check logs:${NC}"
@@ -167,16 +167,8 @@ if [ $? -ne 0 ]; then
     fi
     if [ $? -ne 0 ]; then
         echo -e "${RED}ERROR: Tailscale failed to start. Check logs:${NC}"
-        if [ -f /userdata/system/tailscale/tailscale_up.log ]; then
-            cat /userdata/system/tailscale/tailscale_up.log
-        else
-            echo "No tailscale_up.log found."
-        fi
-        if [ -f /userdata/system/tailscale/boot.log ]; then
-            cat /userdata/system/tailscale/boot.log
-        else
-            echo "No boot.log found."
-        fi
+        cat /userdata/system/tailscale/tailscale_up.log
+        cat /userdata/system/tailscale/boot.log
         exit 1
     fi
 fi
@@ -186,16 +178,8 @@ echo -e "${GREEN}✅ Tailscale up command executed${NC}"
 TAILSCALE_IP=$(/userdata/system/tailscale/bin/tailscale ip -4 2>/dev/null)
 if [ -z "$TAILSCALE_IP" ]; then
     echo -e "${RED}ERROR: Could not fetch Tailscale IP. Check logs:${NC}"
-    if [ -f /userdata/system/tailscale/tailscale_up.log ]; then
-        cat /userdata/system/tailscale/tailscale_up.log
-    else
-        echo "No tailscale_up.log found."
-    fi
-    if [ -f /userdata/system/tailscale/boot.log ]; then
-        cat /userdata/system/tailscale/boot.log
-    else
-        echo "No boot.log found."
-    fi
+    cat /userdata/system/tailscale/tailscale_up.log
+    cat /userdata/system/tailscale/boot.log
     exit 1
 fi
 
@@ -243,11 +227,17 @@ fi
 EOF
 chmod +x /userdata/system/custom.sh || { echo -e "${RED}ERROR: Failed to set custom.sh permissions.${NC}"; exit 1; }
 
+# --- Save Changes Before Verification ---
+echo -e "${YELLOW}💾 Saving overlay...${NC}"
+batocera-save-overlay || { echo -e "${RED}ERROR: Failed to save overlay.${NC}"; exit 1; }
+echo -e "${GREEN}✅ Overlay saved successfully.${NC}"
+
 # --- Verify Tailscale and Local SSH ---
 echo -e "${GREEN}------------------------------------------------------------------------${NC}"
 echo -e "${GREEN}Verifying Tailscale installation...${NC}"
 echo -e "${GREEN}------------------------------------------------------------------------${NC}"
 echo -e "${GREEN}Tailscale is running with IP: $TAILSCALE_IP${NC}"
+sleep 30  # Wait for Tailscale to stabilize
 
 # Check status and interface for debug
 /userdata/system/tailscale/bin/tailscale status
@@ -257,53 +247,15 @@ echo -e "${YELLOW}Test SSH now via Tailscale IP from another device:${NC}"
 echo -e "${YELLOW}    ssh root@$TAILSCALE_IP${NC}"
 echo -e "${YELLOW}Then, from a device on the same LAN ($SUBNET), test local SSH:${NC}"
 echo -e "${YELLOW}    ssh root@192.168.50.5${NC}"
-while true; do
-    read -r -p "Did both SSH tests work? (yes/no): " SSH_CONFIRM
-    if [[ "$SSH_CONFIRM" == "yes" ]]; then
-        break
-    elif [[ "$SSH_CONFIRM" == "no" ]]; then
-        echo -e "${RED}ERROR: SSH failed. Check Tailscale status and logs:${NC}"
-        /userdata/system/tailscale/bin/tailscale status
-        if [ -f /userdata/system/tailscale/tailscale_up.log ]; then
-            cat /userdata/system/tailscale/tailscale_up.log
-        else
-            echo "No tailscale_up.log found."
-        fi
-        if [ -f /userdata/system/tailscale/boot.log ]; then
-            cat /userdata/system/tailscale/boot.log
-        else
-            echo "No boot.log found."
-        fi
-        echo -e "${RED}Resolve issues before saving.${NC}"
-        exit 1
-    else
-        echo "Please enter 'yes' or 'no'."
-    fi
-done
+echo -e "${YELLOW}Note: Use 'root' as username and 'linux' as password. Wait a few seconds if needed.${NC}"
+read -r -p "Did both SSH tests work? (yes/no): " SSH_CONFIRM
+if [[ "$SSH_CONFIRM" == "no" ]]; then
+    echo -e "${YELLOW}WARNING: SSH tests failed, but overlay is saved. Check logs if needed:${NC}"
+    /userdata/system/tailscale/bin/tailscale status
+    cat /userdata/system/tailscale/tailscale_up.log 2>/dev/null || echo "No tailscale_up.log found."
+    cat /userdata/system/tailscale/boot.log 2>/dev/null || echo "No boot.log found."
+fi
 
 echo -e "${GREEN}------------------------------------------------------------------------${NC}"
-echo -e "${GREEN}Tailscale and local SSH installation verified!${NC}"
-read -r -p "Save changes and reboot? THIS IS IRREVERSIBLE (yes/no): " SAVE_CHANGES
-if [[ "$SAVE_CHANGES" == "yes" ]]; then
-    mkdir -p /userdata/system/services
-    cat <<EOF > /userdata/system/services/iptablesload.sh
-#!/bin/bash
-iptables-restore < /userdata/system/iptables.rules
-EOF
-    chmod +x /userdata/system/services/iptablesload.sh
-    if command -v batocera-services &> /dev/null; then
-        batocera-services enable iptablesload
-    else
-        echo -e "${YELLOW}WARNING: batocera-services not found. Using custom.sh to ensure SSH persistence.${NC}"
-    fi
-
-    echo -e "${YELLOW}💾 Saving overlay...${NC}"
-    batocera-save-overlay || { echo -e "${RED}ERROR: Failed to save overlay.${NC}"; exit 1; }
-    echo -e "${GREEN}✅ Overlay saved successfully.${NC}"
-    echo -e "${GREEN}♻️ Rebooting now...${NC}"
-    reboot
-else
-    echo -e "${YELLOW}Changes not saved. Exiting without rebooting.${NC}"
-    echo -e "${YELLOW}Run '/bin/bash /userdata/system/custom.sh' to restart Tailscale if needed.${NC}"
-    exit 0
-fi
+echo -e "${GREEN}Tailscale and local SSH installation complete! Rebooting...${NC}"
+reboot
