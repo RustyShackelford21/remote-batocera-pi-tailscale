@@ -1,7 +1,7 @@
 #!/bin/bash
 #
 # Ultimate SSH Key & Tailscale Setup for Batocera
-# Version: 3.0 - Best of Both Worlds
+# Version: 3.1 - Best of Both Worlds (User Prompts, Smart SCP, Security)
 #
 
 # --- Colors ---
@@ -21,8 +21,6 @@ log() {
 
 # --- Configuration ---
 TAILSCALE_VERSION="1.80.2"
-DEFAULT_HOSTNAME="batocera-pi5"
-DEFAULT_TAG="tag:ssh-batocera"
 INSTALL_DIR="/userdata/system/tailscale"
 
 # --- Functions ---
@@ -37,29 +35,27 @@ echo -e "${YELLOW}Tailscale & SSH Key Setup for Batocera${NC}"
 # --- Root Check ---
 [ "$(id -u)" -ne 0 ] && { log "$RED" "Must be run as root."; exit 1; }
 
-# --- Parse Arguments ---
-AUTH_KEY=""
-HOSTNAME="$DEFAULT_HOSTNAME"
-TAG="$DEFAULT_TAG"
-ADVERTISE_ROUTES=""
-
-while [[ "$#" -gt 0 ]]; do
-  case $1 in
-    --authkey=*) AUTH_KEY="${1#*=}"; shift ;;
-    --hostname=*) HOSTNAME="${1#*=}"; shift ;;
-    --advertise-routes=*) ADVERTISE_ROUTES="${1#*=}"; shift ;;
-    --tag=*) TAG="${1#*=}"; shift ;;
-    --help)
-      echo "Usage: $0 [--authkey=<key>] [--hostname=<name>] [--advertise-routes=<subnet>] [--tag=<tag>]"
-      exit 0
-      ;;
-    *) log "$RED" "Unknown option: $1"; exit 1 ;;
-  esac
-done
-
-# --- Input Validation ---
+# --- Get Tailscale Auth Key ---
+read -rp "Enter your Tailscale auth key: " AUTH_KEY
 [[ -z "$AUTH_KEY" ]] && { log "$RED" "ERROR: --authkey is required."; exit 1; }
 [[ ! "$AUTH_KEY" =~ ^tskey-auth- ]] && { log "$RED" "ERROR: Invalid auth key format."; exit 1; }
+
+# --- Prompt for Hostname ---
+read -rp "Enter a hostname for this device (default: batocera-pi5): " USER_HOSTNAME
+HOSTNAME="${USER_HOSTNAME:-batocera-pi5}"  # Use input or default
+
+# --- Confirm or Override Tag ---
+DEFAULT_TAG="tag:ssh-batocera-1"
+read -rp "Use default tag '$DEFAULT_TAG'? (yes/no): " TAG_CONFIRM
+if [[ "$TAG_CONFIRM" =~ ^[Nn]o$ ]]; then
+    read -rp "Enter your custom Tailscale tag: " USER_TAG
+    TAG="${USER_TAG:-$DEFAULT_TAG}"  # Use input or default
+else
+    TAG="$DEFAULT_TAG"
+fi
+
+log "$GREEN" "✅ Using hostname: $HOSTNAME"
+log "$GREEN" "✅ Using Tailscale tag: $TAG"
 
 # --- Detect Local IP Address (LAN) ---
 LOCAL_IP=$(hostname -I | awk '{print $1}')
