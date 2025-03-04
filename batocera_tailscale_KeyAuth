@@ -1,7 +1,7 @@
 #!/bin/bash
 #
 # Ultimate SSH Key & Tailscale Setup for Batocera
-# Version: 9.1 - Key Reuse, Custom Port, Auto-Download Option
+# Version: 9.3 - Delayed Dropbear Restart
 #
 
 # --- Colors ---
@@ -75,13 +75,6 @@ chmod 600 /etc/dropbear/authorized_keys
 dropbearconvert dropbear openssh "$SSH_DIR/id_dropbear" "$KEYS_DIR/id_ed25519_batocera" || { log "$RED" "Key conversion failed"; exit 1; }
 chmod 600 "$KEYS_DIR/id_ed25519_batocera"
 
-# --- Start Temporary Dropbear ---
-log "$BLUE" "Starting temporary Dropbear on port $PORT (key-only)..."
-pkill -f dropbear || true  # Clear any existing instances
-sleep 1
-/usr/sbin/dropbear -s -p "$PORT" || { log "$RED" "Dropbear failed to start"; exit 1; }
-sleep 1
-
 # --- Save Overlay Early ---
 log "$BLUE" "Saving overlay to persist SSH config..."
 batocera-save-overlay || { log "$RED" "Overlay save failed"; exit 1; }
@@ -108,9 +101,9 @@ cat > /userdata/system/custom.sh <<EOF
 #!/bin/sh
 mkdir -p /dev/net
 [ ! -c /dev/net/tun ] && mknod /dev/net/tun c 10 200 && chmod 600 /dev/net/tun
-pkill -f dropbear || true  # Clear any Dropbear
+pkill -f dropbear || true  # Clear all Dropbear on reboot
 sleep 1
-/usr/sbin/dropbear -s -p 22 || exit 1  # Start Dropbear, fail if it doesn’t
+/usr/sbin/dropbear -s -p 22 || exit 1  # Start Dropbear on 22
 sleep 1
 if ! pgrep -f "$INSTALL_DIR/bin/tailscaled" > /dev/null; then
     $INSTALL_DIR/bin/tailscaled --state=$INSTALL_DIR/tailscaled.state --socket=$INSTALL_DIR/tailscaled.sock &
@@ -121,12 +114,19 @@ EOF
 chmod +x /userdata/system/custom.sh
 batocera-save-overlay || { log "$RED" "Final overlay save failed"; exit 1; }
 
+# --- Restart Dropbear at the End ---
+log "$YELLOW" "⚠️ Keeping Dropbear running until now to avoid disconnects."
+log "$BLUE" "Restarting Dropbear on port $PORT with key auth..."
+pkill -f dropbear || true  # Kill all Dropbear instances now
+sleep 1
+/usr/sbin/dropbear -s -p "$PORT" || { log "$RED" "Dropbear failed to restart"; exit 1; }
+
 # --- Instructions ---
 log "$GREEN" "✅ Setup Complete!"
-log "$YELLOW" "⚠️ IMPORTANT: Download your SSH key NOW before rebooting!"
+log "$YELLOW" "⚠️ IMPORTANT: Your current SSH session has ended. Download your SSH key NOW!"
 log "$CYAN" "Option 1 - Manual SCP:"
 echo -e "${YELLOW}scp root@$LOCAL_IP:/userdata/system/tailscale/keys/id_ed25519_batocera %USERPROFILE%\\.ssh\\id_ed25519${NC}"
-log "$CYAN" "Option 2 - Auto-download with PowerShell (after testing port $PORT):"
+log "$CYAN" "Option 2 - Auto-download with PowerShell:"
 echo -e "${YELLOW}powershell -Command \"scp -i %USERPROFILE%\\.ssh\\id_ed25519 -P $PORT root@$LOCAL_IP:/userdata/system/tailscale/keys/id_ed25519_batocera %USERPROFILE%\\.ssh\\id_ed25519\"${NC}"
 log "$CYAN" "Test SSH on port $PORT:"
 echo -e "${YELLOW}ssh -i %USERPROFILE%\\.ssh\\id_ed25519 -p $PORT root@$LOCAL_IP${NC}"
