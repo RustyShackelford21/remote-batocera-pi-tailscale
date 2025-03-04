@@ -1,7 +1,7 @@
 #!/bin/bash
 #
 # Improved Tailscale Installation with SSH Key Authentication for Batocera Linux
-# Version: 1.0.23-KeyAuth - Corrected Dropbear/PuTTY Key Handling, Syntax Fix
+# Version: 1.0.24-KeyAuth - Interactive Authkey Prompt, Dropbear/PuTTY
 #
 
 # --- Colors ---
@@ -252,31 +252,39 @@ log "</span>{GREEN}" "✅ Using tag: $TAG"
 log "</span>{GREEN}" "✅ Using default tag: $TAG"
     fi
   elif [ -n "<span class="math-inline">TAG" \]; then
-log "</span>{GREEN}" "✅ Using tag: $TAG"
-  fi
-}
-
-
-# --- Setup Authkey (Prompt if not provided) ---
-setup_authkey() {
-  if [ -z "<span class="math-inline">AUTHKEY" \]; then
+log "</span>{GREEN}" "✅ Using tag: <span class="math-inline">TAG"
+fi
+\}
+\# \-\-\- Setup Authkey \(Always Prompt\) \-\-\-
+setup\_authkey\(\) \{
 log "</span>{YELLOW}" "🔑 Please generate a Tailscale REUSABLE and EPHEMERAL auth key:"
     log "<span class="math-inline">\{YELLOW\}" "   Go to\: https\://login\.tailscale\.com/admin/settings/keys"
 log "</span>{YELLOW}" "   - Reusable: ENABLED"
     log "${YELLOW}" "   - Ephemeral: ENABLED"
-     if [ -z "<span class="math-inline">TAG" \]; then
+    if [ -z "<span class="math-inline">TAG" \]; then
 TAG\="ssh\-</span>(echo "<span class="math-inline">HOSTNAME" \| tr '\.' '\-'\)" \# Create tag if none is entered
 log "</span>{YELLOW}" "Creating tag based on Hostname: <span class="math-inline">TAG"
 fi
 log "</span>{YELLOW}" "   - Tags: $TAG"
-    echo -ne "Enter Tailscale auth key (tskey-auth-...): "
-    read -r AUTHKEY
-  fi
 
-  if [ -z "$AUTHKEY" ] || ! echo "<span class="math-inline">AUTHKEY" \| grep \-q '^tskey\-auth\-'; then
-log "</span>{RED}" "❌ Invalid or missing auth key. Exiting."
-    exit 1
-  fi
+    # Loop until a valid authkey is entered
+    while true; do
+        echo -ne "Enter Tailscale auth key (tskey-auth-...): "
+        read -r AUTHKEY
+
+        if [ -z "<span class="math-inline">AUTHKEY" \]; then
+log "</span>{RED}" "❌ No auth key entered. Please enter a valid key."
+            continue # Go back to the beginning of the loop
+        fi
+
+        if ! echo "<span class="math-inline">AUTHKEY" \| grep \-q '^tskey\-auth\-'; then
+log "</span>{RED}" "❌ Invalid auth key format.  Must start with 'tskey-auth-'."
+            continue # Go back to the beginning of the loop
+        fi
+
+        # If we get here, the key is valid.  Break out of the loop.
+        break
+    done
 
   log "<span class="math-inline">\{GREEN\}" "✅ Auth key set"
 \}
@@ -342,6 +350,4 @@ log "</span>{RED}" "ERROR: Dropbear private key file not found.  Key generation 
 # --- Create Detailed Instructions ---
 create_ssh_instructions() {
   local instructions_file="<span class="math-inline">1"
-local public\_key\=</span>(cat "<span class="math-inline">SSH\_DIR/authorized\_keys"\)
-local device\_hostname\=</span>(hostname)
-  local tailscale_ip=$("$INSTALL_DIR/tailscale" --socket="$INSTALL_DIR/tailscaled.sock" ip -4 2>/dev/null || echo "<Tailscale-IP>")
+local public\_key\=</span>(cat "$SSH_DIR/authorized_
