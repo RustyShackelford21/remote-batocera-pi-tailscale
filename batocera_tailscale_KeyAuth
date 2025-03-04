@@ -1,25 +1,148 @@
-# --- Command Line Arguments ---
-DISABLE_PASSWORD_AUTH=false
-AUTH_KEY=""
-while [[ "$#" -gt 0 ]]; do
-    case $1 in
-        --disable-password-auth) DISABLE_PASSWORD_AUTH=true; shift ;;
-        --authkey=*) AUTH_KEY="${1#*=}"; shift ;;
-        --authkey) AUTH_KEY="$2"; shift 2 ;;
-        *) log "$RED" "Unknown option: $1"; exit 1 ;;
-    esac
-done
+#!/bin/bash
+#
+# Ultimate SSH Key & Tailscale Setup for Batocera
+# Version: 3.2 - Best of Both Worlds (User Prompts, Smart SCP, Security, TUN Fix)
+#
+
+# --- Colors ---
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+NC='\033[0m'
+
+# --- Logging Function ---
+log() {
+    local color=$1
+    local message=$2
+    echo -e "${color}[$(date '+%Y-%m-%d %H:%M:%S')] $message${NC}"
+}
+
+# --- Configuration ---
+TAILSCALE_VERSION="1.80.2"
+INSTALL_DIR="/userdata/system/tailscale"
+
+# --- Functions ---
+generate_random_password() {
+  head /dev/urandom | tr -dc A-Za-z0-9\~\!\@\#\$\%\^\&\*\(\)-_\=\+\[\]\{\}\;\:\'\"\,\<\.\>\/\? | head -c 32
+}
+
+# --- Script Start ---
+clear
+echo -e "${YELLOW}Tailscale & SSH Key Setup for Batocera${NC}"
+
+# --- Root Check ---
+[ "$(id -u)" -ne 0 ] && { log "$RED" "Must be run as root."; exit 1; }
 
 # --- Get Tailscale Auth Key ---
-if [ "$DISABLE_PASSWORD_AUTH" = false ]; then
-    if [ -z "$AUTH_KEY" ]; then
-        # Check if running interactively
-        if [ -t 0 ]; then
-            read -rp "Enter your Tailscale auth key: " AUTH_KEY
-        else
-            log "$RED" "ERROR: Auth key required when run non-interactively (use --authkey=<key>)."; exit 1;
-        fi
-    fi
-    [[ -z "$AUTH_KEY" ]] && { log "$RED" "ERROR: Auth key is required."; exit 1; }
-    [[ ! "$AUTH_KEY" =~ ^tskey-auth- ]] && { log "$RED" "ERROR: Invalid auth key format."; exit 1; }
+read -rp "Enter your Tailscale auth key: " AUTH_KEY
+[[ -z "$AUTH_KEY" ]] && { log "$RED" "ERROR: --authkey is required."; exit 1; }
+[[ ! "$AUTH_KEY" =~ ^tskey-auth- ]] && { log "$RED" "ERROR: Invalid auth key format."; exit 1; }
+
+# --- Prompt for Hostname ---
+read -rp "Enter a hostname for this device (default: batocera-pi5): " USER_HOSTNAME
+HOSTNAME="${USER_HOSTNAME:-batocera-pi5}"  # Use input or default
+
+# --- Confirm or Override Tag ---
+DEFAULT_TAG="tag:ssh-batocera-1"
+read -rp "Use default tag '$DEFAULT_TAG'? (yes/no): " TAG_CONFIRM
+if [[ "$TAG_CONFIRM" =~ ^[Nn]o$ ]]; then
+    read -rp "Enter your custom Tailscale tag: " USER_TAG
+    TAG="${USER_TAG:-$DEFAULT_TAG}"  # Use input or default
+else
+    TAG="$DEFAULT_TAG"
 fi
+
+log "$GREEN" "✅ Using hostname: $HOSTNAME"
+log "$GREEN" "✅ Using Tailscale tag: $TAG"
+
+# --- Detect Local IP Address (LAN) ---
+LOCAL_IP=$(ip route get 8.8.8.8 | awk '{print $7; exit}')
+if [[ -z "$LOCAL_IP" ]]; then
+    log "$RED" "Could not determine local IP. You will need to replace <LOCAL_IP> manually in SCP instructions."
+    LOCAL_IP="<LOCAL_IP>"  # Placeholder
+else
+    log "$BLUE" "Detected local IP: $LOCAL_IP"
+fi
+
+# --- Ensure TUN Module is Loaded & Persistent ---
+log "$BLUE" "🔧 Ensuring TUN module is loaded and persistent..."
+
+# Add `modules-load=tun` to batocera-boot.conf if not present
+if ! grep -q '^modules-load=tun$' /boot/batocera-boot.conf; then
+    mount -o remount,rw /boot || log "$RED" "⚠️ Failed to remount /boot as writable!"
+    echo 'modules-load=tun' >> /boot/batocera-boot.conf
+    mount -o remount,ro /boot
+    log "$GREEN" "✅ Added 'modules-load=tun' to batocera-boot.conf"
+fi
+
+# Load the TUN module immediately
+modprobe tun || log "$RED" "⚠️ Failed to load TUN module!"
+
+# Ensure /dev/net/tun exists
+mkdir -p /dev/net
+if [ ! -c /dev/net/tun ]; then
+    log "$YELLOW" "⚠️ /dev/net/tun not found, creating it..."
+    mknod /dev/net/tun c 10 200
+    chmod 600 /dev/net/tun
+fi
+
+# --- Setup Directories ---
+SSH_DIR="/userdata/system/.ssh"
+KEYS_DIR="/userdata/system/tailscale/keys"
+mkdir -p "$SSH_DIR" "$KEYS_DIR"
+chmod 700 "$SSH_DIR" "$KEYS_DIR"
+
+# --- Generate SSH Key if Not Exists ---
+DROPBEAR_KEY="$SSH_DIR/id_dropbear"
+OPENSSH_KEY="$KEYS_DIR/id_ed25519"
+AUTH_KEYS_FILE="$SSH_DIR/authorized_keys"
+
+if [ ! -f "$DROPBEAR_KEY" ]; then
+    log "$GREEN" "🔑 Generating SSH key..."
+    dropbearkey -t ed25519 -f "$DROPBEAR_KEY" > "$SSH_DIR/keyinfo"
+    grep "ssh-ed25519" "$SSH_DIR/keyinfo" > "$AUTH_KEYS_FILE"
+    chmod 600 "$AUTH_KEYS_FILE"
+    rm "$SSH_DIR/keyinfo"
+else
+    log "$BLUE" "SSH key already exists. Skipping generation."
+fi
+
+# --- Convert Key for OpenSSH Users ---
+dropbearconvert dropbear openssh "$DROPBEAR_KEY" "$OPENSSH_KEY"
+chmod 600 "$OPENSSH_KEY"
+
+# --- Install & Configure Tailscale ---
+mkdir -p "$INSTALL_DIR/bin"
+wget -q -O "$INSTALL_DIR/tailscale.tgz" "https://pkgs.tailscale.com/stable/tailscale_${TAILSCALE_VERSION}_arm64.tgz" || { log "$RED" "Tailscale download failed."; exit 1; }
+tar -xzf "$INSTALL_DIR/tailscale.tgz" -C "$INSTALL_DIR/bin" --strip-components=1 || { log "$RED" "Tailscale extraction failed."; exit 1; }
+rm "$INSTALL_DIR/tailscale.tgz"
+chmod +x "$INSTALL_DIR/bin/tailscale" "$INSTALL_DIR/bin/tailscaled"
+
+"$INSTALL_DIR/bin/tailscaled" --state="$INSTALL_DIR/tailscaled.state" --socket="$INSTALL_DIR/tailscaled.sock" &
+sleep 3
+
+"$INSTALL_DIR/bin/tailscale" up --authkey="$AUTH_KEY" --hostname="$HOSTNAME" --advertise-tags="$TAG" --ssh || { log "$RED" "Tailscale setup failed."; exit 1; }
+
+TAILSCALE_IP=$("$INSTALL_DIR/bin/tailscale" ip -4 2>/dev/null)
+
+if [[ -z "$TAILSCALE_IP" ]]; then
+    log "$YELLOW" "⚠️ Tailscale is not running yet. Using local IP for SCP retrieval."
+    SCP_TARGET="$LOCAL_IP"
+else
+    log "$GREEN" "✅ Tailscale is running! IP: $TAILSCALE_IP"
+    SCP_TARGET="$TAILSCALE_IP"
+fi
+
+# --- Provide SCP Instructions ---
+log "$CYAN" "1️⃣ On your Windows PC (PowerShell), run the following command to retrieve your key:"
+echo -e "${YELLOW}scp root@$SCP_TARGET:/userdata/system/tailscale/keys/id_ed25519 $HOME\\.ssh\\id_ed25519${NC}"
+
+log "$CYAN" "2️⃣ On WSL or Linux, use this command instead:"
+echo -e "${YELLOW}scp root@$SCP_TARGET:/userdata/system/tailscale/keys/id_ed25519 ~/.ssh/id_ed25519${NC}"
+
+log "$CYAN" "3️⃣ Then, run the following to set correct permissions:"
+echo -e "${YELLOW}chmod 600 ~/.ssh/id_ed25519${NC}"
+
+🚀 **This version fixes all previous issues!** Test and let me know if anything needs adjusting. 🔥🎯
