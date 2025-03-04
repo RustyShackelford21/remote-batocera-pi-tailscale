@@ -1,7 +1,7 @@
 #!/bin/bash
 #
 # Ultimate SSH Key & Tailscale Setup for Batocera
-# Version: 3.1 - Best of Both Worlds (User Prompts, Smart SCP, Security)
+# Version: 3.2 - Fixed IP Detection, TUN Setup, Simplified Flow
 #
 
 # --- Colors ---
@@ -22,11 +22,9 @@ log() {
 # --- Configuration ---
 TAILSCALE_VERSION="1.80.2"
 INSTALL_DIR="/userdata/system/tailscale"
-
-# --- Functions ---
-generate_random_password() {
-  head /dev/urandom | tr -dc A-Za-z0-9\~\!\@\#\$\%\^\&\*\(\)-_\=\+\[\]\{\}\;\:\'\"\,\<\.\>\/\? | head -c 32
-}
+SSH_DIR="/userdata/system/.ssh"
+KEYS_DIR="/userdata/system/tailscale/keys"
+CUSTOM_SH="/userdata/system/custom.sh"
 
 # --- Script Start ---
 clear
@@ -35,99 +33,147 @@ echo -e "${YELLOW}Tailscale & SSH Key Setup for Batocera${NC}"
 # --- Root Check ---
 [ "$(id -u)" -ne 0 ] && { log "$RED" "Must be run as root."; exit 1; }
 
+# --- Command Line Arguments ---
+DISABLE_PASSWORD_AUTH=false
+while [[ "$#" -gt 0 ]]; do
+    case $1 in
+        --disable-password-auth) DISABLE_PASSWORD_AUTH=true; shift ;;
+        *) log "$RED" "Unknown option: $1"; exit 1 ;;
+    esac
+done
+
 # --- Get Tailscale Auth Key ---
-read -rp "Enter your Tailscale auth key: " AUTH_KEY
-[[ -z "$AUTH_KEY" ]] && { log "$RED" "ERROR: --authkey is required."; exit 1; }
-[[ ! "$AUTH_KEY" =~ ^tskey-auth- ]] && { log "$RED" "ERROR: Invalid auth key format."; exit 1; }
-
-# --- Prompt for Hostname ---
-read -rp "Enter a hostname for this device (default: batocera-pi5): " USER_HOSTNAME
-HOSTNAME="${USER_HOSTNAME:-batocera-pi5}"  # Use input or default
-
-# --- Confirm or Override Tag ---
-DEFAULT_TAG="tag:ssh-batocera-1"
-read -rp "Use default tag '$DEFAULT_TAG'? (yes/no): " TAG_CONFIRM
-if [[ "$TAG_CONFIRM" =~ ^[Nn]o$ ]]; then
-    read -rp "Enter your custom Tailscale tag: " USER_TAG
-    TAG="${USER_TAG:-$DEFAULT_TAG}"  # Use input or default
-else
-    TAG="$DEFAULT_TAG"
+if [ "$DISABLE_PASSWORD_AUTH" = false ]; then
+    read -rp "Enter your Tailscale auth key: " AUTH_KEY
+    [[ -z "$AUTH_KEY" ]] && { log "$RED" "ERROR: Auth key is required."; exit 1; }
+    [[ ! "$AUTH_KEY" =~ ^tskey-auth- ]] && { log "$RED" "ERROR: Invalid auth key format."; exit 1; }
 fi
 
-log "$GREEN" "✅ Using hostname: $HOSTNAME"
-log "$GREEN" "✅ Using Tailscale tag: $TAG"
+# --- Prompt for Hostname and Tag (only on first run) ---
+if [ "$DISABLE_PASSWORD_AUTH" = false ]; then
+    read -rp "Enter a hostname for this device (default: batocera-pi5): " USER_HOSTNAME
+    HOSTNAME="${USER_HOSTNAME:-batocera-pi5}"
+    DEFAULT_TAG="tag:ssh-batocera-1"
+    read -rp "Use default tag '$DEFAULT_TAG'? (yes/no): " TAG_CONFIRM
+    if [[ "$TAG_CONFIRM" =~ ^[Nn]o$ ]]; then
+        read -rp "Enter your custom Tailscale tag: " USER_TAG
+        TAG="${USER_TAG:-$DEFAULT_TAG}"
+    else
+        TAG="$DEFAULT_TAG"
+    fi
+    log "$GREEN" "✅ Using hostname: $HOSTNAME"
+    log "$GREEN" "✅ Using Tailscale tag: $TAG"
+fi
 
 # --- Detect Local IP Address (LAN) ---
-LOCAL_IP=$(hostname -I | awk '{print $1}')
+LOCAL_IP=$(ip addr show | grep -oE 'inet [0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | awk '{print $2}' | grep -v '127.0.0.1' | head -n 1)
 if [[ -z "$LOCAL_IP" ]]; then
-    log "$RED" "Could not determine local IP. You will need to replace <LOCAL_IP> manually in SCP instructions."
-    LOCAL_IP="<LOCAL_IP>"  # Placeholder
+    log "$YELLOW" "⚠️ Could not determine local IP. Using placeholder in SCP instructions."
+    LOCAL_IP="<LOCAL_IP>"
 else
     log "$BLUE" "Detected local IP: $LOCAL_IP"
 fi
 
 # --- Setup Directories ---
-SSH_DIR="/userdata/system/.ssh"
-KEYS_DIR="/userdata/system/tailscale/keys"
-mkdir -p "$SSH_DIR" "$KEYS_DIR"
+mkdir -p "$SSH_DIR" "$KEYS_DIR" "$INSTALL_DIR/bin"
 chmod 700 "$SSH_DIR" "$KEYS_DIR"
 
-# --- Generate SSH Key if Not Exists ---
+# --- Generate SSH Key if Not Exists (only on first run) ---
 DROPBEAR_KEY="$SSH_DIR/id_dropbear"
 OPENSSH_KEY="$KEYS_DIR/id_ed25519"
 AUTH_KEYS_FILE="$SSH_DIR/authorized_keys"
-
-if [ ! -f "$DROPBEAR_KEY" ]; then
+if [ "$DISABLE_PASSWORD_AUTH" = false ] && [ ! -f "$DROPBEAR_KEY" ]; then
     log "$GREEN" "🔑 Generating SSH key..."
-    dropbearkey -t ed25519 -f "$DROPBEAR_KEY" > "$SSH_DIR/keyinfo"
+    dropbearkey -t ed25519 -f "$DROPBEAR_KEY" > "$SSH_DIR/keyinfo" 2>/dev/null
     grep "ssh-ed25519" "$SSH_DIR/keyinfo" > "$AUTH_KEYS_FILE"
-    chmod 600 "$AUTH_KEYS_FILE"
+    chmod 600 "$DROPBEAR_KEY" "$AUTH_KEYS_FILE"
     rm "$SSH_DIR/keyinfo"
+    dropbearconvert dropbear openssh "$DROPBEAR_KEY" "$OPENSSH_KEY" 2>/dev/null
+    chmod 600 "$OPENSSH_KEY"
+    log "$GREEN" "✅ SSH key generated and converted to OpenSSH format."
 else
-    log "$BLUE" "SSH key already exists. Skipping generation."
+    log "$BLUE" "SSH key already exists or in disable mode. Skipping generation."
 fi
 
-# --- Convert Key for OpenSSH Users ---
-dropbearconvert dropbear openssh "$DROPBEAR_KEY" "$OPENSSH_KEY"
-chmod 600 "$OPENSSH_KEY"
+# --- Configure TUN Device for Tailscale ---
+log "$BLUE" "Configuring TUN device..."
+modprobe tun || { log "$RED" "Failed to load TUN module."; exit 1; }
+[ ! -c /dev/net/tun ] && mknod /dev/net/tun c 10 200 && chmod 666 /dev/net/tun
+[ -c /dev/net/tun ] || { log "$RED" "/dev/net/tun still not available."; exit 1; }
 
-# --- Install & Configure Tailscale ---
-mkdir -p "$INSTALL_DIR/bin"
-wget -q -O "$INSTALL_DIR/tailscale.tgz" "https://pkgs.tailscale.com/stable/tailscale_${TAILSCALE_VERSION}_arm64.tgz" || { log "$RED" "Tailscale download failed."; exit 1; }
-tar -xzf "$INSTALL_DIR/tailscale.tgz" -C "$INSTALL_DIR/bin" --strip-components=1 || { log "$RED" "Tailscale extraction failed."; exit 1; }
-rm "$INSTALL_DIR/tailscale.tgz"
-chmod +x "$INSTALL_DIR/bin/tailscale" "$INSTALL_DIR/bin/tailscaled"
+# --- Install & Configure Tailscale (only on first run) ---
+if [ "$DISABLE_PASSWORD_AUTH" = false ]; then
+    log "$BLUE" "Installing Tailscale..."
+    wget -q -O "$INSTALL_DIR/tailscale.tgz" "https://pkgs.tailscale.com/stable/tailscale_${TAILSCALE_VERSION}_arm64.tgz" || { log "$RED" "Tailscale download failed."; exit 1; }
+    tar -xzf "$INSTALL_DIR/tailscale.tgz" -C "$INSTALL_DIR/bin" --strip-components=1 || { log "$RED" "Tailscale extraction failed."; exit 1; }
+    rm "$INSTALL_DIR/tailscale.tgz"
+    chmod +x "$INSTALL_DIR/bin/tailscale" "$INSTALL_DIR/bin/tailscaled"
 
-"$INSTALL_DIR/bin/tailscaled" --state="$INSTALL_DIR/tailscaled.state" --socket="$INSTALL_DIR/tailscaled.sock" &
+    "$INSTALL_DIR/bin/tailscaled" --state="$INSTALL_DIR/tailscaled.state" --socket="$INSTALL_DIR/tailscaled.sock" &>/dev/null &
+    sleep 3
+    pgrep -f tailscaled || { log "$RED" "tailscaled failed to start."; exit 1; }
+    "$INSTALL_DIR/bin/tailscale" up --authkey="$AUTH_KEY" --hostname="$HOSTNAME" --advertise-tags="$TAG" --ssh || { log "$RED" "Tailscale setup failed."; exit 1; }
+    TAILSCALE_IP=$("$INSTALL_DIR/bin/tailscale" ip -4 2>/dev/null)
+    if [[ -z "$TAILSCALE_IP" ]]; then
+        log "$YELLOW" "⚠️ Tailscale IP not yet available. Using local IP for SCP."
+        SCP_TARGET="$LOCAL_IP"
+    else
+        log "$GREEN" "✅ Tailscale running at IP: $TAILSCALE_IP"
+        SCP_TARGET="$TAILSCALE_IP"
+    fi
+fi
+
+# --- Configure Persistence via custom.sh ---
+if [ ! -f "$CUSTOM_SH" ]; then
+    echo "#!/bin/sh" > "$CUSTOM_SH"
+    chmod +x "$CUSTOM_SH"
+fi
+if [ "$DISABLE_PASSWORD_AUTH" = true ]; then
+    log "$BLUE" "Disabling password authentication in custom.sh..."
+    cat > "$CUSTOM_SH" << EOF
+#!/bin/sh
+modprobe tun
+[ ! -c /dev/net/tun ] && mknod /dev/net/tun c 10 200 && chmod 666 /dev/net/tun
+pkill dropbear
+dropbear -k $AUTH_KEYS_FILE -s &>/dev/null &
+sleep 1
+pgrep dropbear || echo "Dropbear failed" >> /userdata/system/tailscale_setup.log
+$INSTALL_DIR/bin/tailscaled --state=$INSTALL_DIR/tailscaled.state --socket=$INSTALL_DIR/tailscaled.sock &>/dev/null &
 sleep 3
-
-"$INSTALL_DIR/bin/tailscale" up --authkey="$AUTH_KEY" --hostname="$HOSTNAME" --advertise-tags="$TAG" --ssh || { log "$RED" "Tailscale setup failed."; exit 1; }
-
-TAILSCALE_IP=$("$INSTALL_DIR/bin/tailscale" ip -4 2>/dev/null)
-
-if [[ -z "$TAILSCALE_IP" ]]; then
-    log "$YELLOW" "⚠️ Tailscale is not running yet. Using local IP for SCP retrieval."
-    SCP_TARGET="$LOCAL_IP"
+pgrep -f tailscaled || echo "Tailscaled failed" >> /userdata/system/tailscale_setup.log
+EOF
 else
-    log "$GREEN" "✅ Tailscale is running! IP: $TAILSCALE_IP"
-    SCP_TARGET="$TAILSCALE_IP"
+    log "$BLUE" "Setting up initial persistence with password auth enabled..."
+    cat > "$CUSTOM_SH" << EOF
+#!/bin/sh
+modprobe tun
+[ ! -c /dev/net/tun ] && mknod /dev/net/tun c 10 200 && chmod 666 /dev/net/tun
+pkill dropbear
+dropbear -k $AUTH_KEYS_FILE &>/dev/null &
+sleep 1
+pgrep dropbear || echo "Dropbear failed" >> /userdata/system/tailscale_setup.log
+$INSTALL_DIR/bin/tailscaled --state=$INSTALL_DIR/tailscaled.state --socket=$INSTALL_DIR/tailscaled.sock &>/dev/null &
+sleep 3
+pgrep -f tailscaled || echo "Tailscaled failed" >> /userdata/system/tailscale_setup.log
+EOF
 fi
 
-# --- Provide SCP Instructions ---
-log "$CYAN" "1️⃣ On your Windows PC (PowerShell), run the following command to retrieve your key:"
-echo -e "${YELLOW}scp root@$SCP_TARGET:/userdata/system/tailscale/keys/id_ed25519 $HOME\\.ssh\\id_ed25519${NC}"
+# --- Provide SCP Instructions (only on first run) ---
+if [ "$DISABLE_PASSWORD_AUTH" = false ]; then
+    log "$CYAN" "1️⃣ On your Windows PC (PowerShell), run this to retrieve your key:"
+    echo -e "${YELLOW}scp root@$SCP_TARGET:/userdata/system/tailscale/keys/id_ed25519 \$HOME\\.ssh\\id_ed25519${NC}"
+    log "$CYAN" "2️⃣ On WSL or Linux, use this instead:"
+    echo -e "${YELLOW}scp root@$SCP_TARGET:/userdata/system/tailscale/keys/id_ed25519 ~/.ssh/id_ed25519${NC}"
+    log "$CYAN" "3️⃣ Set correct permissions locally:"
+    echo -e "${YELLOW}chmod 600 ~/.ssh/id_ed25519${NC}"
+    log "$CYAN" "4️⃣ Test SSH with:"
+    echo -e "${YELLOW}ssh -i ~/.ssh/id_ed25519 root@$SCP_TARGET${NC}"
+    log "$YELLOW" "⚠️ After verifying key login works, run this script again with: ${GREEN}bash $0 --disable-password-auth${NC}"
+else
+    log "$GREEN" "✅ Password authentication disabled. Rebooting in 5 seconds..."
+    sleep 5
+    reboot
+fi
 
-log "$CYAN" "2️⃣ On WSL or Linux, use this command instead:"
-echo -e "${YELLOW}scp root@$SCP_TARGET:/userdata/system/tailscale/keys/id_ed25519 ~/.ssh/id_ed25519${NC}"
-
-log "$CYAN" "3️⃣ Then, run the following to set correct permissions:"
-echo -e "${YELLOW}chmod 600 ~/.ssh/id_ed25519${NC}"
-
-# --- Secure System AFTER Key Transfer ---
-log "$YELLOW" "⚠️ Once you've verified SSH key login works, you can disable password access."
-log "$CYAN" "Run this command to disable password SSH permanently:"
-echo -e "${YELLOW}sed -i '/PasswordAuth/d' /etc/dropbear/dropbear.conf && echo 'PasswordAuth no' >> /etc/dropbear/dropbear.conf && pkill dropbear && dropbear -B${NC}"
-
-log "$GREEN" "✅ SSH Key & Tailscale Setup Complete!"
-log "$CYAN" "Now you can SSH using:"
-echo -e "${YELLOW}ssh -i ~/.ssh/id_ed25519 root@$SCP_TARGET${NC}"
+# --- Final Message ---
+log "$GREEN" "✅ Setup complete! Follow instructions above to secure your system."
