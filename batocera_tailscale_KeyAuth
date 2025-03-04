@@ -1,7 +1,7 @@
 #!/bin/bash
 #
-# Tailscale and SSH Key Setup for Batocera Linux (Dropbear Focus)
-# Version: 1.0.22-KeyAuth - Corrected Dropbear/PuTTY Key Handling
+# Improved Tailscale Installation with SSH Key Authentication for Batocera Linux
+# Version: 1.0.23-KeyAuth - Corrected Dropbear/PuTTY Key Handling, Syntax Fix
 #
 
 # --- Colors ---
@@ -24,7 +24,7 @@ echo \-e "</span>{color}[$(date '+%Y-%m-%d %H:%M:%S')] <span class="math-inline"
 show_progress() {
   local duration=<span class="math-inline">1
 local total\_steps\=20
-local sleep\_time\=</span>(echo "scale=2; $duration/<span class="math-inline">total\_steps" \| bc\)  \# Use bc for floating\-point
+local sleep\_time\=</span>(echo "scale=2; $duration/<span class="math-inline">total\_steps" \| bc\)
 echo \-ne "</span>{CYAN}["
   for ((i=0; i<$total_steps; i++)); do
     sleep "<span class="math-inline">sleep\_time"
@@ -264,6 +264,11 @@ log "</span>{YELLOW}" "🔑 Please generate a Tailscale REUSABLE and EPHEMERAL a
     log "<span class="math-inline">\{YELLOW\}" "   Go to\: https\://login\.tailscale\.com/admin/settings/keys"
 log "</span>{YELLOW}" "   - Reusable: ENABLED"
     log "${YELLOW}" "   - Ephemeral: ENABLED"
+     if [ -z "<span class="math-inline">TAG" \]; then
+TAG\="ssh\-</span>(echo "<span class="math-inline">HOSTNAME" \| tr '\.' '\-'\)" \# Create tag if none is entered
+log "</span>{YELLOW}" "Creating tag based on Hostname: <span class="math-inline">TAG"
+fi
+log "</span>{YELLOW}" "   - Tags: $TAG"
     echo -ne "Enter Tailscale auth key (tskey-auth-...): "
     read -r AUTHKEY
   fi
@@ -314,4 +319,29 @@ convert_and_save_key() {
 log "</span>{CYAN}" "Converting Dropbear key to OpenSSH format for PuTTY..."
 
   # Correctly use dropbearconvert
-  if dropbearconvert dropbear openssh "$SSH_DIR/id_dropbear" "$openssh_key" 2>/dev/null
+  if dropbearconvert dropbear openssh "$SSH_DIR/id_dropbear" "$openssh_key" 2>/dev/null; then
+      chmod 600 "<span class="math-inline">openssh\_key"
+log "</span>{GREEN}" "✅ SSH key converted to OpenSSH format"
+      log "${GREEN}" "✅ Saved to <span class="math-inline">openssh\_key"
+else
+log "</span>{RED}" "❌ Failed to convert key automatically"
+  fi
+
+    # Always copy the *raw* Dropbear key, even if conversion succeeds
+   if [ -f "$SSH_DIR/id_dropbear" ]; then
+      cp "$SSH_DIR/id_dropbear" "$KEYS_DIR/id_dropbear.raw"
+      chmod 600 "<span class="math-inline">KEYS\_DIR/id\_dropbear\.raw"
+else
+log "</span>{RED}" "ERROR: Dropbear private key file not found.  Key generation likely failed."
+      exit 1
+  fi
+
+  create_ssh_instructions "$instructions_file"
+}
+
+# --- Create Detailed Instructions ---
+create_ssh_instructions() {
+  local instructions_file="<span class="math-inline">1"
+local public\_key\=</span>(cat "<span class="math-inline">SSH\_DIR/authorized\_keys"\)
+local device\_hostname\=</span>(hostname)
+  local tailscale_ip=$("$INSTALL_DIR/tailscale" --socket="$INSTALL_DIR/tailscaled.sock" ip -4 2>/dev/null || echo "<Tailscale-IP>")
