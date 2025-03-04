@@ -1,7 +1,7 @@
 #!/bin/bash
 #
 # Ultimate SSH Key & Tailscale Setup for Batocera
-# Version: 9.4 - Robust Dropbear & Tailscale Persistence
+# Version: 9.5 - Ensures SSH Persistence, No Mid-Script Disconnects
 #
 
 # --- Colors ---
@@ -87,9 +87,10 @@ rm "$INSTALL_DIR/tailscale.tgz"
 chmod +x "$INSTALL_DIR/bin/tailscale" "$INSTALL_DIR/bin/tailscaled"
 
 # --- Start Tailscale ---
-log "$BLUE" "Starting Tailscale..."
-"$INSTALL_DIR/bin/tailscaled" --state="$INSTALL_DIR/tailscaled.state" --socket="$INSTALL_DIR/tailscaled.sock" &
+log "$BLUE" "Starting Tailscale daemon..."
+"$INSTALL_DIR/bin/tailscaled" --state="$INSTALL_DIR/tailscaled.state" --socket="$INSTALL_DIR/tailscaled.sock" &  # Background to avoid hang
 sleep 5
+log "$BLUE" "Connecting to Tailscale network..."
 "$INSTALL_DIR/bin/tailscale" --socket="$INSTALL_DIR/tailscaled.sock" up --authkey="$AUTH_KEY" --hostname="$HOSTNAME" --advertise-tags="$TAG" --ssh || { log "$RED" "Tailscale up failed"; exit 1; }
 
 # --- Wait for Tailscale IP Assignment ---
@@ -101,7 +102,7 @@ while [[ -z "$TAILSCALE_IP" && $TRIES -lt 5 ]]; do
     TAILSCALE_IP=$("$INSTALL_DIR/bin/tailscale" --socket="$INSTALL_DIR/tailscaled.sock" ip -4 2>/dev/null)
     ((TRIES++))
 done
-[[ -z "$TAILSCALE_IP" ]] && { log "$YELLOW" "⚠️ Tailscale IP not assigned. Using Local IP."; TAILSCALE_IP="$LOCAL_IP"; } || log "$GREEN" "✅ Tailscale IP: $TAILSCALE_IP"
+[[ -z "$TAILSCALE_IP" ]] && { log "$YELLOW" "⚠️ Tailscale IP not assigned after 15s. Using Local IP."; TAILSCALE_IP="$LOCAL_IP"; } || log "$GREEN" "✅ Tailscale IP: $TAILSCALE_IP"
 
 # --- Configure Persistence ---
 log "$BLUE" "Setting up persistence..."
@@ -122,11 +123,17 @@ EOF
 chmod +x /userdata/system/custom.sh
 batocera-save-overlay || { log "$RED" "Final overlay save failed"; exit 1; }
 
-# --- Restart Dropbear ---
-log "$BLUE" "Restarting Dropbear on port $PORT..."
-pkill -f dropbear || true
-sleep 1
-/usr/sbin/dropbear -s -p "$PORT" || { log "$RED" "Dropbear restart failed! Trying again..."; sleep 3; /usr/sbin/dropbear -s -p "$PORT" || exit 1; }
+# --- Restart Dropbear (Without Disconnecting) ---
+log "$YELLOW" "⚠️ Keeping Dropbear running until now to avoid disconnects."
+log "$BLUE" "Restarting Dropbear on port $PORT with key auth..."
+/usr/sbin/dropbear -s -p "$PORT" || { log "$RED" "Dropbear restart failed!"; exit 1; }
 
-# --- Final Message ---
-log "$GREEN" "✅ Setup Complete! Reboot to apply full persistence."
+# --- Instructions ---
+log "$GREEN" "✅ Setup Complete!"
+log "$CYAN" "Retrieve your SSH key manually from:"
+echo -e "${YELLOW}scp root@$LOCAL_IP:/userdata/system/tailscale/keys/id_ed25519_batocera %USERPROFILE%\\.ssh\\id_ed25519${NC}"
+log "$YELLOW" "Reboot to apply key auth on port 22:"
+echo -e "${YELLOW}reboot${NC}"
+log "$YELLOW" "After reboot, connect with:"
+echo -e "${YELLOW}ssh -i %USERPROFILE%\\.ssh\\id_ed25519 root@$LOCAL_IP${NC}"
+echo -e "${YELLOW}ssh -i %USERPROFILE%\\.ssh\\id_ed25519 root@$TAILSCALE_IP${NC}"
