@@ -1,7 +1,7 @@
 #!/bin/bash
 #
 # Ultimate SSH Key & Tailscale Setup for Batocera
-# Version: 7.4 - Prevent Routing Disconnect, Ensure Persistence
+# Version: 8.1 - Key Auth, No Hang-Ups, Persistence Fixes
 #
 
 # --- Colors ---
@@ -14,19 +14,12 @@ NC='\033[0m'
 
 # --- Logging Function ---
 log() {
-    local color=$1
-    local message=$2
-    echo -e "${color}[$(date '+%Y-%m-%d %H:%M:%S')] $message${NC}"
+    echo -e "${1}[$(date '+%Y-%m-%d %H:%M:%S')] ${2}${NC}"
 }
 
 # --- Configuration ---
 TAILSCALE_VERSION="1.80.2"
 INSTALL_DIR="/userdata/system/tailscale"
-
-# --- Functions ---
-generate_random_password() {
-  head /dev/urandom | tr -dc A-Za-z0-9\~\!\@\#\$\%\^\&\*\(\)-_\=\+\[\]\{\}\;\:\'\"\,\<\.\>\/\? | head -c 32
-}
 
 # --- Script Start ---
 clear
@@ -37,11 +30,6 @@ echo -e "${YELLOW}Tailscale & SSH Key Setup for Batocera${NC}"
 
 # --- Ensure TUN device exists ---
 log "$BLUE" "Ensuring TUN device exists..."
-if ! grep -q '^modules-load=tun$' /boot/batocera-boot.conf; then
-    mount -o remount,rw /boot
-    echo 'modules-load=tun' >> /boot/batocera-boot.conf
-    mount -o remount,ro /boot
-fi
 modprobe tun
 mkdir -p /dev/net
 [ ! -c /dev/net/tun ] && mknod /dev/net/tun c 10 200 && chmod 600 /dev/net/tun
@@ -52,30 +40,19 @@ read -rp "Enter your Tailscale auth key: " AUTH_KEY
 [[ ! "$AUTH_KEY" =~ ^tskey-auth- ]] && { log "$RED" "ERROR: Invalid auth key format."; exit 1; }
 
 # --- Prompt for Hostname ---
-read -rp "Enter a hostname for this device (default: batocera-pi5): " USER_HOSTNAME
+read -rp "Enter a hostname (default: batocera-pi5): " USER_HOSTNAME
 HOSTNAME="${USER_HOSTNAME:-batocera-pi5}"
 
-# --- Confirm or Override Tag ---
-DEFAULT_TAG="tag:ssh-batocera"
-read -rp "Use default tag '$DEFAULT_TAG'? (yes/no): " TAG_CONFIRM
-if [[ "$TAG_CONFIRM" =~ ^[Nn]o$ ]]; then
-    read -rp "Enter your custom Tailscale tag: " USER_TAG
-    TAG="${USER_TAG:-$DEFAULT_TAG}"
-else
-    TAG="$DEFAULT_TAG"
-fi
+# --- Prompt for Tag ---
+read -rp "Enter your Tailscale tag (e.g., tag:ssh-batocera-1): " TAG
+[[ -z "$TAG" ]] && { log "$RED" "ERROR: Tag is required."; exit 1; }
 
 log "$GREEN" "✅ Using hostname: $HOSTNAME"
 log "$GREEN" "✅ Using Tailscale tag: $TAG"
 
-# --- Detect Local IP Address ---
+# --- Detect Local IP ---
 LOCAL_IP=$(ip -4 addr show | grep -oE "inet [0-9]+\.[0-9]+\.[0-9]+\.[0-9]+" | awk '{print $2}' | grep -v "127.0.0.1" | head -n 1)
-if [[ -z "$LOCAL_IP" ]]; then
-    log "$RED" "Could not determine local IP. Replace <LOCAL_IP> manually."
-    LOCAL_IP="<LOCAL_IP>"
-else
-    log "$BLUE" "Detected local IP: $LOCAL_IP"
-fi
+[[ -z "$LOCAL_IP" ]] && { log "$RED" "Could not determine local IP."; LOCAL_IP="<LOCAL_IP>"; } || log "$BLUE" "Detected local IP: $LOCAL_IP"
 
 # --- Setup Directories ---
 SSH_DIR="/userdata/system/.ssh"
@@ -83,118 +60,58 @@ KEYS_DIR="/userdata/system/tailscale/keys"
 mkdir -p "$SSH_DIR" "$KEYS_DIR" /etc/dropbear
 chmod 700 "$SSH_DIR" "$KEYS_DIR" /etc/dropbear
 
-# --- Generate SSH Key if Not Exists ---
-DROPBEAR_KEY="$SSH_DIR/id_dropbear"
-OPENSSH_KEY="$KEYS_DIR/id_ed25519_batocera"
+# --- Generate SSH Key ---
+log "$GREEN" "🔑 Generating SSH key..."
+dropbearkey -t ed25519 -f "$SSH_DIR/id_dropbear" || { log "$RED" "Key generation failed"; exit 1; }
+chmod 600 "$SSH_DIR/id_dropbear"
+dropbearkey -y -f "$SSH_DIR/id_dropbear" | grep "^ssh-ed25519" > /etc/dropbear/authorized_keys || { log "$RED" "Failed to extract public key"; exit 1; }
+chmod 600 /etc/dropbear/authorized_keys
+dropbearconvert dropbear openssh "$SSH_DIR/id_dropbear" "$KEYS_DIR/id_ed25519_batocera" || { log "$RED" "Key conversion failed"; exit 1; }
+chmod 600 "$KEYS_DIR/id_ed25519_batocera"
 
-if [ ! -f "$DROPBEAR_KEY" ]; then
-    log "$GREEN" "🔑 Generating SSH key..."
-    dropbearkey -t ed25519 -f "$DROPBEAR_KEY" || { log "$RED" "Key generation failed"; exit 1; }
-    chmod 600 "$DROPBEAR_KEY"
-    dropbearkey -y -f "$DROPBEAR_KEY" | grep "^ssh-ed25519" > /etc/dropbear/authorized_keys || { log "$RED" "Failed to extract public key"; exit 1; }
-    chmod 600 /etc/dropbear/authorized_keys
-else
-    log "$BLUE" "SSH key already exists. Skipping generation."
-    dropbearkey -y -f "$DROPBEAR_KEY" | grep "^ssh-ed25519" > /etc/dropbear/authorized_keys || { log "$RED" "Failed to extract public key"; exit 1; }
-    chmod 600 /etc/dropbear/authorized_keys
-fi
-
-# --- Convert Key for OpenSSH Users ---
-dropbearconvert dropbear openssh "$DROPBEAR_KEY" "$OPENSSH_KEY" || { log "$RED" "Key conversion failed"; exit 1; }
-chmod 600 "$OPENSSH_KEY"
-
-# --- Configure Dropbear (dropbear.conf) - Disable Password Auth ---
-log "$BLUE" "Configuring Dropbear..."
-DROPBEAR_CONF="/etc/dropbear/dropbear.conf"
-touch "$DROPBEAR_CONF"
-[[ ! -w "$DROPBEAR_CONF" ]] && { log "$RED" "ERROR: Cannot write to $DROPBEAR_CONF"; exit 1; }
-sed -i '/^PasswordAuth/d' "$DROPBEAR_CONF" 2>/dev/null || true
-echo "PasswordAuth no" >> "$DROPBEAR_CONF"
-
-# --- Start Dropbear on Port 2222 (Temporary) ---
-log "$BLUE" "Starting temporary Dropbear instance on port 2222 (key-only)..."
+# --- Start Dropbear on Port 2222 ---
+log "$BLUE" "Starting Dropbear on port 2222 (key-only)..."
 /usr/sbin/dropbear -s -p 2222 -B &
 
-# --- Save Overlay Early (Prevent Loss on Disconnect) ---
+# --- Save Overlay Early ---
 log "$BLUE" "Saving overlay to persist SSH config..."
 batocera-save-overlay
 
-# --- Install & Configure Tailscale ---
+# --- Install Tailscale ---
 mkdir -p "$INSTALL_DIR/bin"
 wget -q -O "$INSTALL_DIR/tailscale.tgz" "https://pkgs.tailscale.com/stable/tailscale_${TAILSCALE_VERSION}_arm64.tgz" || { log "$RED" "Tailscale download failed."; exit 1; }
 tar -xzf "$INSTALL_DIR/tailscale.tgz" -C "$INSTALL_DIR/bin" --strip-components=1 || { log "$RED" "Tailscale extraction failed."; exit 1; }
 rm "$INSTALL_DIR/tailscale.tgz"
 chmod +x "$INSTALL_DIR/bin/tailscale" "$INSTALL_DIR/bin/tailscaled"
 
-# --- Network Configuration (Minimal, Delay Routing Impact) ---
-echo 'net.ipv4.ip_forward = 1' >> /etc/sysctl.conf
-echo 'net.ipv6.conf.all.forwarding = 1' >> /etc/sysctl.conf
-sysctl -p || true
-
 # --- Start Tailscale ---
 log "$BLUE" "Starting Tailscale..."
 "$INSTALL_DIR/bin/tailscaled" --state="$INSTALL_DIR/tailscaled.state" --socket="$INSTALL_DIR/tailscaled.sock" &
 sleep 5
+"$INSTALL_DIR/bin/tailscale" --socket="$INSTALL_DIR/tailscaled.sock" up --authkey="$AUTH_KEY" --hostname="$HOSTNAME" --advertise-tags="$TAG" --ssh
 
-TAILSCALE_UP_CMD=(
-  "$INSTALL_DIR/bin/tailscale"
-  "--socket=$INSTALL_DIR/tailscaled.sock"
-  "up"
-  "--authkey=$AUTH_KEY"
-  "--hostname=$HOSTNAME"
-  "--advertise-tags=$TAG"
-  "--ssh"
-  "--snat-subnet-routes=false"  # Minimize immediate routing changes
-  "--accept-routes"
-)
-"${TAILSCALE_UP_CMD[@]}" || { log "$RED" "Tailscale setup failed."; exit 1; }
-sleep 10  # Wait for routing to stabilize
-
-TAILSCALE_IP=$("$INSTALL_DIR/bin/tailscale" --socket="$INSTALL_DIR/tailscaled.sock" ip -4 2>/dev/null)
-if [[ -z "$TAILSCALE_IP" ]]; then
-    log "$YELLOW" "⚠️ Tailscale IP not retrieved yet. Using local IP for SCP."
-    SCP_TARGET="$LOCAL_IP"
-else
-    log "$GREEN" "✅ Tailscale IP: $TAILSCALE_IP"
-    SCP_TARGET="$TAILSCALE_IP"
-fi
-
-# --- custom.sh for Persistence ---
+# --- Configure Persistence ---
 cat > /userdata/system/custom.sh <<EOF
 #!/bin/sh
 mkdir -p /dev/net
 [ ! -c /dev/net/tun ] && mknod /dev/net/tun c 10 200 && chmod 600 /dev/net/tun
-pkill dropbear
-/usr/sbin/dropbear -B
+
+if ! pgrep dropbear > /dev/null; then
+    /usr/sbin/dropbear -s -p 22 -B &
+fi
+
 if ! pgrep -f "/userdata/system/tailscale/bin/tailscaled" > /dev/null; then
-    /userdata/system/tailscale/bin/tailscaled --state=/userdata/system/tailscaled.state --socket=/userdata/system/tailscale/tailscaled.sock &
+    /userdata/system/tailscale/bin/tailscaled --state=/userdata/system/tailscaled.state --socket=/userdata/system/tailscaled.sock &
     sleep 5
-    /bin/sh -c '${TAILSCALE_UP_CMD[*]}'
+    /userdata/system/tailscale/bin/tailscale --socket=/userdata/system/tailscaled.sock up --hostname="$HOSTNAME" --advertise-tags="$TAG" --ssh --accept-routes
 fi
 EOF
 chmod +x /userdata/system/custom.sh
-
-# --- Final Save Overlay ---
-log "$BLUE" "Saving final overlay..."
 batocera-save-overlay
 
-# --- Provide SCP Instructions ---
-log "$GREEN" "✅ SSH Key & Tailscale Setup Complete!"
-log "$CYAN" "Retrieve your SSH key using ONE of the following commands:"
-echo -e "${YELLOW}scp root@$SCP_TARGET:/userdata/system/tailscale/keys/id_ed25519_batocera $HOME/.ssh/id_ed25519${NC}  (for Linux/WSL)"
-echo -e "${YELLOW}scp root@$SCP_TARGET:/userdata/system/tailscale/keys/id_ed25519_batocera %USERPROFILE%\\.ssh\\id_ed25519${NC}  (for Windows PowerShell)"
-log "$CYAN" "Then, set permissions:"
-echo -e "${YELLOW}chmod 600 ~/.ssh/id_ed25519${NC} (Linux/WSL)  or  ${YELLOW}icacls %USERPROFILE%\\.ssh\\id_ed25519 /inheritance:r /grant:r \"%username%:F\"${NC} (Windows)"
-log "$CYAN" "*Test* SSH connection (using port 2222 initially):"
-echo -e "${YELLOW}ssh -i ~/.ssh/id_ed25519 -p 2222 root@$SCP_TARGET${NC}"
-log "$YELLOW" "If the test on port 2222 is successful, reboot to apply on port 22:"
-echo -e "${YELLOW}reboot${NC}"
-log "$YELLOW" "After reboot, connect on port 22 or Tailscale IP:"
-echo -e "${YELLOW}ssh -i ~/.ssh/id_ed25519 root@$SCP_TARGET${NC}"
-echo -e "${YELLOW}ssh -i ~/.ssh/id_ed25519 root@\$(/userdata/system/tailscale/bin/tailscale ip -4)${NC}"
-
-# --- Reset Root Password ---
-NEW_PASSWORD=$(generate_random_password)
-echo "root:$NEW_PASSWORD" | chpasswd
-log "$RED" "IMPORTANT: The root password has been reset to a random value."
-log "$RED" "You will ONLY be able to log in using your SSH key."
+# --- Warnings Before Reboot ---
+log "$YELLOW" "⚠️ IMPORTANT: Download your SSH key before rebooting!"
+log "$CYAN" "Retrieve your SSH key:"
+echo -e "${YELLOW}scp root@$LOCAL_IP:/userdata/system/tailscale/keys/id_ed25519_batocera %USERPROFILE%\\.ssh\\id_ed25519${NC}"
+log "$YELLOW" "After reboot, connect with:"
+echo -e "${YELLOW}ssh -i %USERPROFILE%\\.ssh\\id_ed25519 root@$LOCAL_IP${NC}"
