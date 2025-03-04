@@ -1,7 +1,7 @@
 #!/bin/bash
 #
 # Ultimate SSH Key & Tailscale Setup for Batocera
-# Version: 7.1 - Automated, Port 2222 Safety, Corrected, User-Friendly, GitHub Ready
+# Version: 7.3 - Fixed Tailscale Socket, Confirmed Key Storage
 #
 
 # --- Colors ---
@@ -35,7 +35,7 @@ echo -e "${YELLOW}Tailscale & SSH Key Setup for Batocera${NC}"
 # --- Root Check ---
 [ "$(id -u)" -ne 0 ] && { log "$RED" "Must be run as root."; exit 1; }
 
-# --- Ensure TUN device exists BEFORE anything else ---
+# --- Ensure TUN device exists ---
 log "$BLUE" "Ensuring TUN device exists..."
 if ! grep -q '^modules-load=tun$' /boot/batocera-boot.conf; then
     mount -o remount,rw /boot
@@ -68,54 +68,52 @@ fi
 log "$GREEN" "✅ Using hostname: $HOSTNAME"
 log "$GREEN" "✅ Using Tailscale tag: $TAG"
 
-# --- Detect Local IP Address (Reliable Method) ---
-LOCAL_IP=$(ip route get 8.8.8.8 | awk '{print $NF; exit}')
+# --- Detect Local IP Address ---
+LOCAL_IP=$(ip -4 addr show | grep -oE "inet [0-9]+\.[0-9]+\.[0-9]+\.[0-9]+" | awk '{print $2}' | grep -v "127.0.0.1" | head -n 1)
 if [[ -z "$LOCAL_IP" ]]; then
-    log "$RED" "Could not determine local IP.  Replace <LOCAL_IP> manually."
+    log "$RED" "Could not determine local IP. Replace <LOCAL_IP> manually."
     LOCAL_IP="<LOCAL_IP>"
 else
     log "$BLUE" "Detected local IP: $LOCAL_IP"
 fi
 
 # --- Setup Directories ---
-SSH_DIR="/userdata/system/.ssh"  # For the *private* key (Dropbear format)
-KEYS_DIR="/userdata/system/tailscale/keys" # For the *OpenSSH* converted key
-mkdir -p "$SSH_DIR" "$KEYS_DIR"
-chmod 700 "$SSH_DIR" "$KEYS_DIR"
+SSH_DIR="/userdata/system/.ssh"  # Dropbear private key
+KEYS_DIR="/userdata/system/tailscale/keys" # OpenSSH private key
+mkdir -p "$SSH_DIR" "$KEYS_DIR" /etc/dropbear
+chmod 700 "$SSH_DIR" "$KEYS_DIR" /etc/dropbear
 
 # --- Generate SSH Key if Not Exists ---
 DROPBEAR_KEY="$SSH_DIR/id_dropbear"
-OPENSSH_KEY="$KEYS_DIR/id_ed25519_batocera" # Clearer naming
+OPENSSH_KEY="$KEYS_DIR/id_ed25519_batocera"
 
 if [ ! -f "$DROPBEAR_KEY" ]; then
     log "$GREEN" "🔑 Generating SSH key..."
     dropbearkey -t ed25519 -f "$DROPBEAR_KEY" || { log "$RED" "Key generation failed"; exit 1; }
     chmod 600 "$DROPBEAR_KEY"
-    # Extract and write the PUBLIC key DIRECTLY to /etc/dropbear/authorized_keys
-    dropbearkey -y -f "$DROPBEAR_KEY" | grep "^ssh-ed25519" > /etc/dropbear/authorized_keys || { log "$RED" "Failed to extract public key"; exit 1;}
+    dropbearkey -y -f "$DROPBEAR_KEY" | grep "^ssh-ed25519" > /etc/dropbear/authorized_keys || { log "$RED" "Failed to extract public key"; exit 1; }
     chmod 600 /etc/dropbear/authorized_keys
 else
     log "$BLUE" "SSH key already exists. Skipping generation."
-    # Key exists, but *ensure* the public key is in authorized_keys
-    dropbearkey -y -f "$DROPBEAR_KEY" | grep "^ssh-ed25519" > /etc/dropbear/authorized_keys || { log "$RED" "Failed to extract public key"; exit 1;}
-     chmod 600 /etc/dropbear/authorized_keys
+    dropbearkey -y -f "$DROPBEAR_KEY" | grep "^ssh-ed25519" > /etc/dropbear/authorized_keys || { log "$RED" "Failed to extract public key"; exit 1; }
+    chmod 600 /etc/dropbear/authorized_keys
 fi
 
 # --- Convert Key for OpenSSH Users ---
-dropbearconvert dropbear openssh "$DROPBEAR_KEY" "$OPENSSH_KEY" || { log "$RED" "Key conversion failed"; exit 1;}
+dropbearconvert dropbear openssh "$DROPBEAR_KEY" "$OPENSSH_KEY" || { log "$RED" "Key conversion failed"; exit 1; }
 chmod 600 "$OPENSSH_KEY"
 
 # --- Configure Dropbear (dropbear.conf) - Disable Password Auth ---
 log "$BLUE" "Configuring Dropbear..."
 DROPBEAR_CONF="/etc/dropbear/dropbear.conf"
-touch "$DROPBEAR_CONF" # Ensure it exists
+touch "$DROPBEAR_CONF"
 [[ ! -w "$DROPBEAR_CONF" ]] && { log "$RED" "ERROR: Cannot write to $DROPBEAR_CONF"; exit 1; }
-sed -i '/^PasswordAuth/d' "$DROPBEAR_CONF" 2>/dev/null || true  # Remove any existing line
-echo "PasswordAuth no" >> "$DROPBEAR_CONF"  # Disable password authentication
+sed -i '/^PasswordAuth/d' "$DROPBEAR_CONF" 2>/dev/null || true
+echo "PasswordAuth no" >> "$DROPBEAR_CONF"
 
-# --- Start Dropbear on Port 2222 (Temporary - for Key-Based Setup) ---
+# --- Start Dropbear on Port 2222 (Temporary) ---
 log "$BLUE" "Starting temporary Dropbear instance on port 2222 (key-only)..."
-/usr/sbin/dropbear -s -p 2222 -B &  # -s disables password auth on this instance
+/usr/sbin/dropbear -s -p 2222 -B &
 
 # --- Install & Configure Tailscale ---
 mkdir -p "$INSTALL_DIR/bin"
@@ -129,12 +127,14 @@ echo 'net.ipv4.ip_forward = 1' >> /etc/sysctl.conf
 echo 'net.ipv6.conf.all.forwarding = 1' >> /etc/sysctl.conf
 sysctl -p || true
 
-# --- Start Tailscale (First Run) ---
+# --- Start Tailscale ---
+log "$BLUE" "Starting Tailscale..."
 "$INSTALL_DIR/bin/tailscaled" --state="$INSTALL_DIR/tailscaled.state" --socket="$INSTALL_DIR/tailscaled.sock" &
-sleep 3
+sleep 5
 
 TAILSCALE_UP_CMD=(
   "$INSTALL_DIR/bin/tailscale"
+  "--socket=$INSTALL_DIR/tailscaled.sock"
   "up"
   "--authkey=$AUTH_KEY"
   "--hostname=$HOSTNAME"
@@ -145,32 +145,23 @@ TAILSCALE_UP_CMD=(
 )
 "${TAILSCALE_UP_CMD[@]}" || { log "$RED" "Tailscale setup failed."; exit 1; }
 
-TAILSCALE_IP=$("$INSTALL_DIR/bin/tailscale" ip -4 2>/dev/null)
-
+TAILSCALE_IP=$("$INSTALL_DIR/bin/tailscale" --socket="$INSTALL_DIR/tailscaled.sock" ip -4 2>/dev/null)
 if [[ -z "$TAILSCALE_IP" ]]; then
-    log "$YELLOW" "⚠️ Tailscale is not running yet. Using local IP for SCP."
+    log "$YELLOW" "⚠️ Tailscale IP not retrieved yet. Using local IP for SCP."
     SCP_TARGET="$LOCAL_IP"
 else
-    log "$GREEN" "✅ Tailscale is running! IP: $TAILSCALE_IP"
+    log "$GREEN" "✅ Tailscale IP: $TAILSCALE_IP"
     SCP_TARGET="$TAILSCALE_IP"
 fi
 
-# --- custom.sh for Persistence (Starts Dropbear on port 22) ---
+# --- custom.sh for Persistence ---
 cat > /userdata/system/custom.sh <<EOF
 #!/bin/sh
 # Start Dropbear and Tailscale on boot
-
-# Ensure tun module is loaded and /dev/net/tun exists
 mkdir -p /dev/net
 [ ! -c /dev/net/tun ] && mknod /dev/net/tun c 10 200 && chmod 600 /dev/net/tun
-
-# Kill any existing Dropbear instances
 pkill dropbear
-
-# Start Dropbear on port 22 (Password auth is disabled in dropbear.conf)
 /usr/sbin/dropbear -B
-
-# Start Tailscale if not already running
 if ! pgrep -f "/userdata/system/tailscale/bin/tailscaled" > /dev/null; then
     /userdata/system/tailscale/bin/tailscaled --state=/userdata/system/tailscaled.state --socket=/userdata/system/tailscale/tailscaled.sock &
     sleep 5
@@ -179,23 +170,25 @@ fi
 EOF
 chmod +x /userdata/system/custom.sh
 
-# --- Provide SCP Instructions (Clear and Concise) ---
+# --- Provide SCP Instructions ---
 log "$GREEN" "✅ SSH Key & Tailscale Setup Complete!"
 log "$CYAN" "Retrieve your SSH key using ONE of the following commands:"
 echo -e "${YELLOW}scp root@$SCP_TARGET:/userdata/system/tailscale/keys/id_ed25519_batocera $HOME/.ssh/id_ed25519${NC}  (for Linux/WSL)"
 echo -e "${YELLOW}scp root@$SCP_TARGET:/userdata/system/tailscale/keys/id_ed25519_batocera %USERPROFILE%\\.ssh\\id_ed25519${NC}  (for Windows PowerShell)"
 log "$CYAN" "Then, set permissions:"
-echo -e "${YELLOW}chmod 600 ~/.ssh/id_ed25519${NC} (Linux/WSL)  or  ${YELLOW}Get-Acl %USERPROFILE%\\.ssh\\id_ed25519 | Set-Acl -Path %USERPROFILE%\\.ssh\\id_ed25519${NC} (Windows - adjust if needed)"
+echo -e "${YELLOW}chmod 600 ~/.ssh/id_ed25519${NC} (Linux/WSL)  or  ${YELLOW}icacls %USERPROFILE%\\.ssh\\id_ed25519 /inheritance:r /grant:r \"%username%:F\"${NC} (Windows)"
 log "$CYAN" "*Test* SSH connection (using port 2222 initially):"
 echo -e "${YELLOW}ssh -i ~/.ssh/id_ed25519 -p 2222 root@$SCP_TARGET${NC}"
-log "$YELLOW" "If the test on port 2222 is successful, you can reboot."
-log "$YELLOW" "After reboot, connect on port 22:"
-echo -e "${YELLOW}ssh -i ~/.ssh/id_ed25519 root@\$(tailscale ip -4)${NC}"
+log "$YELLOW" "If the test on port 2222 is successful, reboot to apply on port 22:"
+echo -e "${YELLOW}reboot${NC}"
+log "$YELLOW" "After reboot, connect on port 22 or Tailscale IP:"
+echo -e "${YELLOW}ssh -i ~/.ssh/id_ed25519 root@$SCP_TARGET${NC}"
+echo -e "${YELLOW}ssh -i ~/.ssh/id_ed25519 root@\$(/userdata/system/tailscale/bin/tailscale ip -4)${NC}"
 
-# --- Reset Root Password (Security) ---
+# --- Reset Root Password ---
 NEW_PASSWORD=$(generate_random_password)
 echo "root:$NEW_PASSWORD" | chpasswd
 log "$RED" "IMPORTANT: The root password has been reset to a random value."
 log "$RED" "You will ONLY be able to log in using your SSH key."
 
-batocera-save-overlay # Persist changes
+batocera-save-overlay
