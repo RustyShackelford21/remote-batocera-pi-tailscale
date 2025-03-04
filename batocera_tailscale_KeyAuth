@@ -1,7 +1,7 @@
 #!/bin/bash
 #
 # Ultimate SSH Key & Tailscale Setup for Batocera
-# Version: 7.0 - Automated, Port 2222 Safety, Corrected, User-Friendly
+# Version: 7.1 - Automated, Port 2222 Safety, Corrected, User-Friendly, GitHub Ready
 #
 
 # --- Colors ---
@@ -172,7 +172,7 @@ pkill dropbear
 
 # Start Tailscale if not already running
 if ! pgrep -f "/userdata/system/tailscale/bin/tailscaled" > /dev/null; then
-    /userdata/system/tailscale/bin/tailscaled --state=/userdata/system/tailscale/tailscaled.state --socket=/userdata/system/tailscale/tailscaled.sock &
+    /userdata/system/tailscale/bin/tailscaled --state=/userdata/system/tailscaled.state --socket=/userdata/system/tailscale/tailscaled.sock &
     sleep 5
     /bin/sh -c '${TAILSCALE_UP_CMD[*]}'
 fi
