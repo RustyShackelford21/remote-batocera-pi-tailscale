@@ -1,7 +1,7 @@
 #!/bin/bash
 #
-# Improved Tailscale Installation with SSH Key Authentication for Batocera Linux
-# Version: 1.0.18-KeyAuth - Tag Handling from 1.0.16, Space Fix
+# Tailscale + SSH Key Setup for Batocera Linux
+# Version: 1.0.19-KeyAuth - Fresh Card, Tag from 1.0.16, Hostname Fix
 #
 
 # --- Colors ---
@@ -70,7 +70,7 @@ ADVERTISE_EXIT_NODE=false
 ACCEPT_ROUTES=false
 AUTO_REBOOT=false
 DEFAULT_TAG="tag:ssh-batocera-1"  # From 1.0.16
-TAG="$DEFAULT_TAG"  # Default tag
+TAG="$DEFAULT_TAG"
 
 while [[ "$#" -gt 0 ]]; do
   case $1 in
@@ -102,7 +102,7 @@ while [[ "$#" -gt 0 ]]; do
 done
 
 # --- Variables ---
-TEMP_DIR="/userdata/system/tailscale_install"  # Persistent storage
+TEMP_DIR="/userdata/system/tailscale_install"
 INSTALL_DIR="/userdata/system/tailscale"
 SSH_DIR="/userdata/system/.ssh"
 KEYS_DIR="/userdata/system/tailscale/keys"
@@ -188,26 +188,11 @@ setup_ssh_keys() {
   chmod 600 "$SSH_DIR/authorized_keys"
   log "${GREEN}" "✅ SSH key pair generated—as shown below:"
   dropbearkey -y -f "$SSH_DIR/id_dropbear" || { log "${RED}" "Failed to display key"; exit 1; }
-  convert_and_save_key
-}
-
-# --- Convert Key ---
-convert_and_save_key() {
-  local openssh_key="$KEYS_DIR/id_ed25519"
-  local openssh_key_pub="$KEYS_DIR/id_ed25519.pub"
-  local instructions_file="$KEYS_DIR/SSH_INSTRUCTIONS.txt"
-  if command -v dropbearconvert &> /dev/null; then
-    log "${CYAN}" "Converting key..."
-    dropbearconvert dropbear openssh "$SSH_DIR/id_dropbear" "$openssh_key" 2>/dev/null || log "${YELLOW}" "Conversion failed—manual needed"
-    [ -f "$openssh_key" ] && chmod 600 "$openssh_key" && log "${GREEN}" "✅ Converted to $openssh_key"
-    [ -f "$SSH_DIR/authorized_keys" ] && cp "$SSH_DIR/authorized_keys" "$openssh_key_pub" && chmod 644 "$openssh_key_pub"
-  else
-    log "${YELLOW}" "dropbearconvert not found—copy raw key"
-    cp "$SSH_DIR/id_dropbear" "$KEYS_DIR/id_dropbear.raw"
-    chmod 600 "$KEYS_DIR/id_dropbear.raw"
-  fi
+  cp "$SSH_DIR/id_dropbear" "$KEYS_DIR/id_dropbear.raw"
+  chmod 600 "$KEYS_DIR/id_dropbear.raw"
+  log "${GREEN}" "✅ Raw private key copied to $KEYS_DIR/id_dropbear.raw"
   log "${GREEN}" "✅ Public key added—key auth enabled on reboot"
-  create_ssh_instructions "$instructions_file"
+  create_ssh_instructions "$KEYS_DIR/SSH_INSTRUCTIONS.txt"
 }
 
 # --- SSH Instructions ---
@@ -223,31 +208,29 @@ create_ssh_instructions() {
 PUBLIC KEY:
 $public_key
 
-KEY LOCATIONS:
-- Dropbear: /userdata/system/.ssh/id_dropbear
-- OpenSSH (if converted): /userdata/system/tailscale/keys/id_ed25519
-- Public: /userdata/system/tailscale/keys/id_ed25519.pub
-- Raw (if needed): /userdata/system/tailscale/keys/id_dropbear.raw
+KEY LOCATION:
+- Raw Dropbear private key: /userdata/system/tailscale/keys/id_dropbear.raw
 
-WINDOWS:
-1. Download via WinSCP or SFTP:
-   - /userdata/system/tailscale/keys/id_ed25519 (if converted)
-   - OR /userdata/system/tailscale/keys/id_dropbear.raw
-2. If raw, convert: dropbearconvert dropbear openssh id_dropbear.raw id_ed25519_batocera
-3. SSH: ssh -i C:\\Users\\YourUsername\\.ssh\\id_ed25519_batocera root@$tailscale_ip
+HOW TO COPY AND USE:
+1. BEFORE REBOOT (while password SSH works):
+   a. Run: cat /userdata/system/tailscale/keys/id_dropbear.raw
+   b. Copy the output (binary data) into a text editor (e.g., Notepad++).
+   c. Save as: C:\Users\YourUsername\.ssh\id_dropbear.raw (no .txt extension).
+2. ON YOUR MACHINE:
+   a. Install Dropbear tools (e.g., WSL: sudo apt install dropbear-bin).
+   b. Convert: dropbearconvert dropbear openssh C:\Users\YourUsername\.ssh\id_dropbear.raw C:\Users\YourUsername\.ssh\id_ed25519_batocera
+   c. Set permissions (Linux/Mac): chmod 600 ~/.ssh/id_ed25519_batocera
+3. AFTER REBOOT:
+   - SSH: ssh -i C:\Users\YourUsername\.ssh\id_ed25519_batocera root@$tailscale_ip
 
-LINUX/MAC:
-1. scp root@192.168.50.5:/userdata/system/tailscale/keys/id_ed25519 ~/.ssh/batocera_key
-   # OR if raw: scp root@192.168.50.5:/userdata/system/tailscale/keys/id_dropbear.raw ~/.ssh/id_dropbear.raw
-   # Convert: dropbearconvert dropbear openssh id_dropbear.raw batocera_key
-2. chmod 600 ~/.ssh/batocera_key
-3. ssh -i ~/.ssh/batocera_key root@$tailscale_ip
-
-NOTE: Password auth disabled post-reboot—copy key first!
+WARNING: Password auth disabled post-reboot—copy the raw key NOW!
 =======================================================================
 EOF
   chmod 644 "$instructions_file"
   log "${GREEN}" "✅ Instructions at $instructions_file"
+  log "${YELLOW}" "Copy this raw private key NOW (before reboot):"
+  cat "$KEYS_DIR/id_dropbear.raw"
+  log "${YELLOW}" "Save as C:\Users\YourUsername\.ssh\id_dropbear.raw and convert—see instructions!"
 }
 
 # --- Download Tailscale ---
@@ -274,14 +257,14 @@ configure_network() {
   show_progress 1
   if [ -n "$ADVERTISE_ROUTES" ] || [ "$ADVERTISE_EXIT_NODE" = true ]; then
     touch /etc/sysctl.conf
-    mount -o remount,rw /
+    mount -o remount,rw / || { log "${RED}" "Failed to mount / rw"; exit 1; }
     grep -q "net.ipv4.ip_forward = 1" /etc/sysctl.conf || echo "net.ipv4.ip_forward = 1" >> /etc/sysctl.conf
     grep -q "net.ipv6.conf.all.forwarding = 1" /etc/sysctl.conf || echo "net.ipv6.conf.all.forwarding = 1" >> /etc/sysctl.conf
     sysctl -p /etc/sysctl.conf || true
     mount -o remount,ro /
     log "${GREEN}" "✅ IP forwarding enabled"
   fi
-  mount -o remount,rw /boot
+  mount -o remount,rw /boot || { log "${RED}" "Failed to mount /boot rw"; exit 1; }
   grep -q "^modules-load=tun$" /boot/batocera-boot.conf || echo "modules-load=tun" >> /boot/batocera-boot.conf
   mount -o remount,ro /boot
   modprobe tun || { log "${RED}" "Failed to load tun module"; exit 1; }
@@ -292,6 +275,22 @@ configure_network() {
 # --- Configure Persistence ---
 configure_persistence() {
   log "${BLUE}" "Step 7/9: Configuring persistence..."
+  # Construct Tailscale up command
+  local ts_up_cmd=(
+    "$INSTALL_DIR/tailscale"
+    "--socket=$INSTALL_DIR/tailscaled.sock"
+    "up"
+    "--ssh"
+    "--hostname=$HOSTNAME"
+  )
+  [ -n "$TAG" ] && ts_up_cmd+=("--advertise-tags=$TAG")
+  [ -n "$ADVERTISE_ROUTES" ] && ts_up_cmd+=("--advertise-routes=$ADVERTISE_ROUTES")
+  [ "$ADVERTISE_EXIT_NODE" = true ] && ts_up_cmd+=("--advertise-exit-node")
+  [ "$ACCEPT_ROUTES" = true ] && ts_up_cmd+=("--accept-routes")
+  [ -n "$AUTHKEY" ] && ts_up_cmd+=("--authkey=$AUTHKEY")
+  printf "%s\n" "${ts_up_cmd[*]}" > "$INSTALL_DIR/tailscale_up_cmd.sh"
+  chmod +x "$INSTALL_DIR/tailscale_up_cmd.sh"
+
   cat > "$INSTALL_DIR/start_tailscale.sh" << EOF
 #!/bin/sh
 INSTALL_DIR="$INSTALL_DIR"
@@ -309,7 +308,7 @@ mkdir -p /dev/net
 "\$INSTALL_DIR/tailscaled" --state="\$INSTALL_DIR/state/tailscaled.state" --socket="\$INSTALL_DIR/tailscaled.sock" &
 sleep 5
 pgrep -f tailscaled || { echo "tailscaled failed" >> /userdata/system/logs/tailscale_sshkey_setup.log; exit 1; }
-"\$INSTALL_DIR/tailscale" --socket="\$INSTALL_DIR/tailscaled.sock" up --ssh --reset
+/bin/sh "\$INSTALL_DIR/tailscale_up_cmd.sh"
 EOF
   chmod +x "$INSTALL_DIR/start_tailscale.sh"
   if [ -f /userdata/system/custom.sh ]; then
@@ -383,18 +382,17 @@ verify_installation() {
 # --- Show Info ---
 show_info() {
   local tailscale_ip=$("$INSTALL_DIR/tailscale" --socket="$INSTALL_DIR/tailscaled.sock" ip -4 2>/dev/null || echo "<Tailscale-IP>")
-  local openssh_key="$KEYS_DIR/id_ed25519"
   echo -e "${PURPLE}=========================================================${NC}"
   echo -e "${PURPLE}          Tailscale & SSH Key Setup Complete!           ${NC}"
   echo -e "${PURPLE}=========================================================${NC}"
   echo -e "${CYAN}Tailscale IP:${NC} $tailscale_ip"
   echo -e "\n${CYAN}SSH INFO:${NC}"
-  [ -f "$openssh_key" ] && echo -e "${GREEN}Key: $openssh_key${NC}" || echo -e "${YELLOW}Raw key: $KEYS_DIR/id_dropbear.raw${NC}"
+  echo -e "${GREEN}Raw key: $KEYS_DIR/id_dropbear.raw${NC}"
   echo -e "\n${CYAN}NEXT STEPS:${NC}"
-  echo -e "1. ${GREEN}Copy key${NC} (see $KEYS_DIR/SSH_INSTRUCTIONS.txt)"
+  echo -e "1. ${GREEN}Copy key NOW${NC} (see $KEYS_DIR/SSH_INSTRUCTIONS.txt)"
   echo -e "2. ${GREEN}Reboot${NC} for key-only auth"
   echo -e "3. ${GREEN}SSH:${NC} ssh -i C:\\Users\\YourUsername\\.ssh\\id_ed25519_batocera root@$tailscale_ip"
-  echo -e "\n${YELLOW}WARNING: Password auth disabled post-reboot—copy key first!${NC}"
+  echo -e "\n${YELLOW}WARNING: Password auth disabled post-reboot—copy key before rebooting!${NC}"
   if [ "$AUTO_REBOOT" = false ]; then
     read -r -p "Reboot now? (yes/no): " reboot_answer
     [[ "$reboot_answer" =~ ^[Yy][Ee][Ss]$ ]] && { echo -e "${YELLOW}Rebooting...${NC}"; sleep 2; reboot; }
