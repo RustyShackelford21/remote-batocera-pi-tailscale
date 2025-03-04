@@ -38,7 +38,7 @@ create_dirs() {
   mkdir -p /userdata/system/logs
   mkdir -p /userdata/system/.ssh
   mkdir -p "/userdata/system/tailscale/keys"
-  mkdir -p /etc/sysctl.d
+  mkdir -p /etc/sysctl.d  # Create sysctl.d directory
   chmod 700 /userdata/system/.ssh
   chmod 700 /userdata/system/tailscale/keys
 }
@@ -56,7 +56,7 @@ log "</span>{RED}" "Make sure you're running this from the Batocera terminal"
 setup_tun_device() {
   log "<span class="math-inline">\{BLUE\}" "Setting up TUN device\.\.\."
 \# Load the TUN module
-if \! lsmod \| grep \-q '^tun '; then
+if \! lsmod \| grep \-q '^tun '; then  \# More reliable check for module loading
 modprobe tun \|\| \{ log "</span>{RED}" "Failed to load tun module"; exit 1; }
   fi
 
@@ -66,7 +66,7 @@ modprobe tun \|\| \{ log "</span>{RED}" "Failed to load tun module"; exit 1; }
   # Create the /dev/net/tun device node if it doesn't exist
   if [ ! -c /dev/net/tun ]; then
     mknod /dev/net/tun c 10 200 || { log "<span class="math-inline">\{RED\}" "Failed to create tun device node"; exit 1; \}
-chmod 666 /dev/net/tun
+chmod 666 /dev/net/tun  \# Batocera seems to need 666 for tun to work\.
 fi
 log "</span>{GREEN}" "TUN device setup complete."
 }
@@ -75,7 +75,7 @@ log "</span>{GREEN}" "TUN device setup complete."
 clear
 create_dirs()
 check_permissions()
-setup_tun_device()
+setup_tun_device()  # Setup TUN device *early*
 
 echo -e "<span class="math-inline">\{PURPLE\}\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=\=</span>{NC}"
 echo -e "${PURPLE}   Tailscale and SSH Key Setup for Batocera Linux (WSL)   <span class="math-inline">\{NC\}"
@@ -85,7 +85,7 @@ log "</span>{BLUE}" "Starting setup process..."
 
 # --- Argument Parsing ---
 TAILSCALE_ARGS=""
-AUTO_CONNECT=false
+AUTO_CONNECT=false # This is no longer used in the same way, but kept for clarity
 AUTHKEY=""
 HOSTNAME="batocera-pi"
 ADVERTISE_ROUTES=""
@@ -111,14 +111,14 @@ while [[ "$#" -gt 0 ]]; do
 echo \-e "</span>{GREEN}Usage: <span class="math-inline">0 \[OPTIONS\]</span>{NC}"
       echo ""
       echo -e "<span class="math-inline">\{CYAN\}Options\:</span>{NC}"
-      echo "  --authkey=KEY          (Optional) Tailscale auth key.  Will prompt if not provided."
-      echo "  --hostname=NAME        Set hostname (default: batocera-pi)"
-      echo "  --advertise-routes=IP  Advertise subnet routes (e.g., 192.168.1.0/24)"
-      echo "  --exit-node            Advertise as an exit node"
-      echo "  --accept-routes        Accept subnet routes from other devices"
-      echo "  --auto-reboot          Automatically reboot after installation"
-      echo "  --tag=TAG              Apply a Tailscale tag (default: ssh-batocera-1)"
-      echo "  --help                 Show this help message"
+      echo "  --authkey=KEY             Provide Tailscale auth key (optional, will prompt if not provided)"
+      echo "  --hostname=NAME           Set hostname for this device (default: batocera-pi)"
+      echo "  --advertise-routes=SUBNET Advertise subnet routes (e.g., 192.168.1.0/24)"
+      echo "  --exit-node               Advertise this device as an exit node"
+      echo "  --accept-routes           Accept subnet routes from other devices"
+      echo "  --auto-reboot             Automatically reboot after installation"
+      echo "  --tag=TAG                 Apply a Tailscale tag to this device (default: ssh-batocera-1)"
+      echo "  --help                    Show this help message"
       echo ""
       exit 0
       ;;
@@ -179,12 +179,12 @@ log "</span>{RED}" "Error: dropbearconvert is required but not found."
 \# \-\-\- Create Directories \-\-\-
 create\_directories\(\) \{
 log "</span>{BLUE}" "Step 1/9: Creating directories..."
-  mkdir -p "$TEMP_DIR"
+  mkdir -p "$TEMP_DIR"  # Create the new temporary directory
   mkdir -p "$INSTALL_DIR"
   mkdir -p "$INSTALL_DIR/state"
   mkdir -p "$SSH_DIR"
   mkdir -p "$KEYS_DIR"
-  mkdir -p /etc/sysctl.d
+  mkdir -p /etc/sysctl.d  # Create sysctl.d directory
   chmod 700 "$SSH_DIR"
   chmod 700 "<span class="math-inline">KEYS\_DIR"
 log "</span>{GREEN}" "Directories created successfully!"
@@ -194,6 +194,7 @@ log "</span>{GREEN}" "Directories created successfully!"
 detect_subnet() {
   log "<span class="math-inline">\{BLUE\}" "Step 2/9\: Detecting network subnet\.\.\."
 show\_progress 1
+\# Try to detect the local subnet \(improved logic\)
 local ip\_cmd\_output
 local gateway
 local subnet
@@ -215,12 +216,12 @@ subnet\=</span>(ip addr | grep -E "inet .* brd .* scope global" | head -n1 | awk
 log "</span>{GREEN}" "✅ Detected subnet: <span class="math-inline">subnet"
 echo \-e "</span>{YELLOW}Note: Only one device can advertise this subnet${NC}"
 
-    if [ -z "$ADVERTISE_ROUTES" ] && [ "$AUTO_CONNECT" != "true" ]; then
-      echo -ne "Advertise this subnet? (yes/no): "
+    if [ -z "$ADVERTISE_ROUTES" ] && [ "$AUTO_CONNECT" != "true" ]; then # Simplified check
+      echo -ne "Would you like to advertise this subnet? (yes/no): "
       read -r advertise_answer
       if [[ "<span class="math-inline">advertise\_answer" \=\~ ^\[Yy\]\(\[Ee\]\[Ss\]\)?</span> ]]; then
         ADVERTISE_ROUTES="<span class="math-inline">subnet"
-log "</span>{GREEN}" "✅ Advertising subnet: <span class="math-inline">subnet"
+log "</span>{GREEN}" "✅ Will advertise subnet: <span class="math-inline">subnet"
 else
 log "</span>{YELLOW}" "Not advertising subnet"
       fi
@@ -228,12 +229,13 @@ log "</span>{YELLOW}" "Not advertising subnet"
   else
     log "${YELLOW}" "Could not detect subnet automatically."
   fi
+    # Ensure ADVERTISE_ROUTES is set even if not detected/confirmed
     [ -z "$ADVERTISE_ROUTES" ] && ADVERTISE_ROUTES="$subnet"
 }
 
 # --- Set Hostname ---
 setup_hostname() {
-  if [ "$HOSTNAME" == "batocera-pi" ] && [ "$AUTO_CONNECT" != "true" ]; then
+  if [ "$HOSTNAME" == "batocera-pi" ] && [ "$AUTO_CONNECT" != "true" ]; then # Simplified check
     echo -ne "Enter a hostname (default: $HOSTNAME): "
     read -r new_hostname
     if [ -n "$new_hostname" ]; then
@@ -242,13 +244,13 @@ fi
 fi
 log "</span>{GREEN}" "✅ Using hostname: $HOSTNAME"
 
-  if [ -z "$TAG" ] && [ "$AUTO_CONNECT" != "true" ]; then
+  if [ -z "$TAG" ] && [ "$AUTO_CONNECT" != "true" ]; then  #Simplified Check
     echo -ne "Enter Tailscale tag (optional, press Enter for default '$DEFAULT_TAG'): "
     read -r new_tag
     if [ -n "$new_tag" ]; then
       TAG="$new_tag"
     else
-      TAG="$DEFAULT_TAG"
+      TAG="$DEFAULT_TAG"  # Use the default tag if none provided
     fi
   elif [ -n "<span class="math-inline">TAG" \]; then
 log "</span>{GREEN}" "✅ Using provided tag: $TAG"
@@ -264,7 +266,7 @@ log "</span>{YELLOW}" "🔑 Please generate a Tailscale REUSABLE and EPHEMERAL a
 log "</span>{YELLOW}" "   - Reusable: ENABLED"
     log "${YELLOW}" "   - Ephemeral: ENABLED"
     if [ -z "<span class="math-inline">TAG" \]; then
-TAG\="ssh\-</span>(echo "<span class="math-inline">HOSTNAME" \| tr '\.' '\-'\)"
+TAG\="ssh\-</span>(echo "<span class="math-inline">HOSTNAME" \| tr '\.' '\-'\)" \# Create tag if none is entered
 log "</span>{YELLOW}" "Creating tag based on Hostname: <span class="math-inline">TAG"
 fi
 log "</span>{YELLOW}" "   - Tags: $TAG"
@@ -276,14 +278,15 @@ log "</span>{YELLOW}" "   - Tags: $TAG"
 
         if [ -z "<span class="math-inline">AUTHKEY" \]; then
 log "</span>{RED}" "❌ No auth key entered. Please enter a valid key."
-            continue
+            continue # Go back to the beginning of the loop
         fi
 
         if ! echo "<span class="math-inline">AUTHKEY" \| grep \-q '^tskey\-auth\-'; then
 log "</span>{RED}" "❌ Invalid auth key format.  Must start with 'tskey-auth-'."
-            continue
+            continue # Go back to the beginning of the loop
         fi
 
+        # If we get here, the key is valid.  Break out of the loop.
         break
     done
 
@@ -317,6 +320,7 @@ log "</span>{RED}" "Failed to generate SSH keys. Exiting."
 log "</span>{GREEN}" "✅ SSH key pair generated"
   log "${GREEN}" "✅ Public key added to authorized_keys—key auth enabled on reboot"
 
+  # Convert and save the key (correctly)
   convert_and_save_key
 }
 
@@ -326,6 +330,7 @@ convert_and_save_key() {
   local instructions_file="<span class="math-inline">KEYS\_DIR/SSH\_INSTRUCTIONS\.txt"
 log "</span>{CYAN}" "Converting Dropbear key to OpenSSH format..."
 
+  # Correctly use dropbearconvert
   if dropbearconvert dropbear openssh "$SSH_DIR/id_dropbear" "$openssh_key" 2>/dev/null; then
       chmod 600 "<span class="math-inline">openssh\_key"
 log "</span>{GREEN}" "✅ SSH key converted to OpenSSH format"
@@ -352,22 +357,6 @@ create_ssh_instructions() {
   local instructions_file="<span class="math-inline">1"
 local tailscale\_ip
 \# Try to get Tailscale IP\.  Handle potential failure\.
-if \! tailscale\_ip\=</span>("<span class="math-inline">INSTALL\_DIR/tailscale" ip \-4 2\>/dev/null\); then
+if \! tailscale\_ip\=</span>("$INSTALL_DIR/tailscale" --socket="<span class="math-inline">INSTALL\_DIR/tailscaled\.sock" ip \-4 2\>/dev/null\); then
 tailscale\_ip\="<Tailscale IP\>"
-log "</span>{YELLOW}" "Could not determine Tailscale IP yet.  It will be shown after reboot."
-  fi
-
-  cat <<EOF > "$instructions_file"
-=====================================================================
-     SSH Key Instructions for Batocera with Tailscale (WSL)
-=====================================================================
-
-1. **Private Key (WSL):**
-
-   - The OpenSSH-formatted private key has been saved to:
-     $KEYS_DIR/id_ed25519
-
-   - You need to copy this key to your WSL environment.  The *easiest*
-     way to do this is using 'tailscale file get' *if* Tailscale
-     connects before the reboot.  If it does, you'll see instructions
-     for
+log "</span>{YELLOW}" "
