@@ -23,12 +23,12 @@ else
     echo "No subnet detected, proceeding without advertising routes"
 fi
 
-# Clean up existing keys
+# Clean up existing keys (won’t affect current session)
 rm -f /root/.ssh/id_dropbear /root/.ssh/id_dropbear_openssh /etc/dropbear/authorized_keys
 
 # Generate new Dropbear key
-dropbearkey -t ed25519 -f /root/.ssh/id_dropbear
-dropbearconvert dropbear openssh /root/.ssh/id_dropbear /root/.ssh/id_dropbear_openssh
+dropbearkey -t ed25519 -f /root/.ssh/id_dropbear > /dev/null 2>&1
+dropbearconvert dropbear openssh /root/.ssh/id_dropbear /root/.ssh/id_dropbear_openssh > /dev/null 2>&1
 dropbearkey -y -f /root/.ssh/id_dropbear | grep "ssh-ed25519" > /etc/dropbear/authorized_keys
 
 # Set permissions
@@ -36,15 +36,8 @@ chmod 600 /root/.ssh/id_dropbear /root/.ssh/id_dropbear_openssh /etc/dropbear/au
 mkdir -p /etc/dropbear
 chmod 700 /etc/dropbear
 
-# Stop existing services
-pkill -f dropbear
-pkill -f tailscaled
-sleep 2
-
-# Start Dropbear with key-only auth
-dropbear -s -p 22 &>/dev/null &
-sleep 1
-pgrep dropbear || echo "Dropbear failed to start"
+# Start Dropbear on port 2222 with new key (keeps current session on 22 alive)
+dropbear -s -p 2222 &>/dev/null &
 
 # Set up TUN device
 modprobe tun
@@ -52,23 +45,54 @@ modprobe tun
 sleep 2
 
 # Start Tailscale
+pkill -f tailscaled
+sleep 2
 /userdata/system/tailscale/bin/tailscaled --state=/userdata/system/tailscaled.state --socket=/userdata/system/tailscaled.sock &>/dev/null &
 sleep 30
 
-# Configure Tailscale with user inputs and subnet
-/userdata/system/tailscale/bin/tailscale --socket=/userdata/system/tailscaled.sock up --authkey="$AUTH_KEY" --hostname="$HOSTNAME" --advertise-tags="$TAG" --accept-routes $ADVERTISE_ROUTES &>/dev/null || echo "Tailscale up failed"
+# Configure Tailscale
+/userdata/system/tailscale/bin/tailscale --socket=/userdata/system/tailscaled.sock up --authkey="$AUTH_KEY" --hostname="$HOSTNAME" --advertise-tags="$TAG" --accept-routes $ADVERTISE_ROUTES &>/dev/null || echo "Tailscale up failed" > /userdata/system/tailscale_setup.log
 sleep 5
 
 # Log Tailscale status
-/userdata/system/tailscale/bin/tailscale --socket=/userdata/system/tailscaled.sock status > /userdata/system/tailscale_status.log 2>&1 || echo "Tailscale status check failed"
+/userdata/system/tailscale/bin/tailscale --socket=/userdata/system/tailscaled.sock status > /userdata/system/tailscale_status.log 2>&1 || echo "Tailscale status check failed" >> /userdata/system/tailscale_setup.log
 
 # Save overlay for /etc/dropbear
 batocera-save-overlay
 
-# Copy the OpenSSH key to a downloadable location
+# Copy the key to a downloadable location
 cp /root/.ssh/id_dropbear_openssh /userdata/system/tailscale_key_openssh
 
-echo "Script complete. Reboot to test persistence."
-echo "Download the private key from /userdata/system/tailscale_key_openssh via SCP:"
-echo "scp root@192.168.50.5:/userdata/system/tailscale_key_openssh C:\\Users\\Willi\\.ssh\\id_dropbear_openssh"
-echo "For other devices (e.g., iPhone Terminus), copy this key after downloading."
+# Set up custom.sh for boot persistence (runs on port 22)
+cat > /userdata/system/custom.sh << 'EOF'
+#!/bin/sh
+modprobe tun
+[ ! -c /dev/net/tun ] && mknod /dev/net/tun c 10 200 && chmod 666 /dev/net/tun
+sleep 2
+pkill -f dropbear
+dropbear -s -p 22 &>/dev/null &
+sleep 1
+pkill -f tailscaled
+sleep 2
+/userdata/system/tailscale/bin/tailscaled --state=/userdata/system/tailscaled.state --socket=/userdata/system/tailscaled.sock &>/dev/null &
+sleep 30
+/userdata/system/tailscale/bin/tailscale --socket=/userdata/system/tailscaled.sock up --authkey="AUTH_KEY_PLACEHOLDER" --hostname="HOSTNAME_PLACEHOLDER" --advertise-tags="TAG_PLACEHOLDER" --accept-routes ADVERTISE_ROUTES_PLACEHOLDER &>/dev/null || echo "Tailscale up failed" >> /userdata/system/tailscale_setup.log
+sleep 5
+/userdata/system/tailscale/bin/tailscale --socket=/userdata/system/tailscaled.sock status > /userdata/system/tailscale_status.log 2>&1 || echo "Tailscale status check failed" >> /userdata/system/tailscale_setup.log
+EOF
+sed -i "s|AUTH_KEY_PLACEHOLDER|$AUTH_KEY|" /userdata/system/custom.sh
+sed -i "s|HOSTNAME_PLACEHOLDER|$HOSTNAME|" /userdata/system/custom.sh
+sed -i "s|TAG_PLACEHOLDER|$TAG|" /userdata/system/custom.sh
+sed -i "s|ADVERTISE_ROUTES_PLACEHOLDER|$ADVERTISE_ROUTES|" /userdata/system/custom.sh
+chmod +x /userdata/system/custom.sh
+
+echo "Setup complete! Your current SSH session is still active on port 22."
+echo "1. Download the new private key:"
+echo "   scp root@192.168.50.5:/userdata/system/tailscale_key_openssh C:\\Users\\Willi\\.ssh\\id_dropbear_openssh"
+echo "2. Test SSH with the new key on port 2222:"
+echo "   ssh -i $HOME\\.ssh\\id_dropbear_openssh -p 2222 root@192.168.50.5"
+echo "3. Reboot to apply the new setup on port 22:"
+echo "   reboot"
+echo "4. After reboot, test SSH on port 22 (local IP) and Tailscale IP (from /userdata/system/tailscale_status.log):"
+echo "   ssh -i $HOME\\.ssh\\id_dropbear_openssh root@192.168.50.5"
+echo "   ssh -i $HOME\\.ssh\\id_dropbear_openssh root@<tailscale-ip>"
