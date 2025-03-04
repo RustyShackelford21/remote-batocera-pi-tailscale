@@ -1,7 +1,7 @@
 #!/bin/bash
 #
 # Ultimate SSH Key & Tailscale Setup for Batocera
-# Version: 7.3 - Fixed Tailscale Socket, Confirmed Key Storage
+# Version: 7.4 - Prevent Routing Disconnect, Ensure Persistence
 #
 
 # --- Colors ---
@@ -78,8 +78,8 @@ else
 fi
 
 # --- Setup Directories ---
-SSH_DIR="/userdata/system/.ssh"  # Dropbear private key
-KEYS_DIR="/userdata/system/tailscale/keys" # OpenSSH private key
+SSH_DIR="/userdata/system/.ssh"
+KEYS_DIR="/userdata/system/tailscale/keys"
 mkdir -p "$SSH_DIR" "$KEYS_DIR" /etc/dropbear
 chmod 700 "$SSH_DIR" "$KEYS_DIR" /etc/dropbear
 
@@ -115,6 +115,10 @@ echo "PasswordAuth no" >> "$DROPBEAR_CONF"
 log "$BLUE" "Starting temporary Dropbear instance on port 2222 (key-only)..."
 /usr/sbin/dropbear -s -p 2222 -B &
 
+# --- Save Overlay Early (Prevent Loss on Disconnect) ---
+log "$BLUE" "Saving overlay to persist SSH config..."
+batocera-save-overlay
+
 # --- Install & Configure Tailscale ---
 mkdir -p "$INSTALL_DIR/bin"
 wget -q -O "$INSTALL_DIR/tailscale.tgz" "https://pkgs.tailscale.com/stable/tailscale_${TAILSCALE_VERSION}_arm64.tgz" || { log "$RED" "Tailscale download failed."; exit 1; }
@@ -122,7 +126,7 @@ tar -xzf "$INSTALL_DIR/tailscale.tgz" -C "$INSTALL_DIR/bin" --strip-components=1
 rm "$INSTALL_DIR/tailscale.tgz"
 chmod +x "$INSTALL_DIR/bin/tailscale" "$INSTALL_DIR/bin/tailscaled"
 
-# --- Network Configuration ---
+# --- Network Configuration (Minimal, Delay Routing Impact) ---
 echo 'net.ipv4.ip_forward = 1' >> /etc/sysctl.conf
 echo 'net.ipv6.conf.all.forwarding = 1' >> /etc/sysctl.conf
 sysctl -p || true
@@ -140,10 +144,11 @@ TAILSCALE_UP_CMD=(
   "--hostname=$HOSTNAME"
   "--advertise-tags=$TAG"
   "--ssh"
-  "--snat-subnet-routes=false"
+  "--snat-subnet-routes=false"  # Minimize immediate routing changes
   "--accept-routes"
 )
 "${TAILSCALE_UP_CMD[@]}" || { log "$RED" "Tailscale setup failed."; exit 1; }
+sleep 10  # Wait for routing to stabilize
 
 TAILSCALE_IP=$("$INSTALL_DIR/bin/tailscale" --socket="$INSTALL_DIR/tailscaled.sock" ip -4 2>/dev/null)
 if [[ -z "$TAILSCALE_IP" ]]; then
@@ -157,7 +162,6 @@ fi
 # --- custom.sh for Persistence ---
 cat > /userdata/system/custom.sh <<EOF
 #!/bin/sh
-# Start Dropbear and Tailscale on boot
 mkdir -p /dev/net
 [ ! -c /dev/net/tun ] && mknod /dev/net/tun c 10 200 && chmod 600 /dev/net/tun
 pkill dropbear
@@ -169,6 +173,10 @@ if ! pgrep -f "/userdata/system/tailscale/bin/tailscaled" > /dev/null; then
 fi
 EOF
 chmod +x /userdata/system/custom.sh
+
+# --- Final Save Overlay ---
+log "$BLUE" "Saving final overlay..."
+batocera-save-overlay
 
 # --- Provide SCP Instructions ---
 log "$GREEN" "✅ SSH Key & Tailscale Setup Complete!"
@@ -190,5 +198,3 @@ NEW_PASSWORD=$(generate_random_password)
 echo "root:$NEW_PASSWORD" | chpasswd
 log "$RED" "IMPORTANT: The root password has been reset to a random value."
 log "$RED" "You will ONLY be able to log in using your SSH key."
-
-batocera-save-overlay
