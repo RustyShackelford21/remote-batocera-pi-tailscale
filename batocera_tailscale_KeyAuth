@@ -1,5 +1,5 @@
 #!/bin/bash
-# Version: 10.8 - Fully Automated, No Config File Needed
+# Version: 10.9 - Fully Automated, Password Auth Fallback for SCP
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -111,16 +111,20 @@ fi
 EOF
 chmod +x /userdata/system/custom.sh
 
-log "$BLUE" "Starting temporary Dropbear on port 2222..."
-/usr/sbin/dropbear -s -p 2222 &
+log "$BLUE" "Starting temporary Dropbear on port 2222 with password auth..."
+/usr/sbin/dropbear -p 2222 &  # Password auth on 2222
+sleep 2
+log "$BLUE" "Starting key-only Dropbear on port 2223 for testing..."
+/usr/sbin/dropbear -s -p 2223 &
 
 log "$GREEN" "✅ Setup Complete (Phase 1)!"
-log "$YELLOW" "⚠️ Test SSH key on port 2222 BEFORE proceeding."
+log "$YELLOW" "⚠️ Test SSH key on port 2223 BEFORE proceeding."
 log "$CYAN" "1. Copy the SSH key to your PC's default location (run in a new terminal):"
-echo -e "${YELLOW}scp root@$LOCAL_IP:/userdata/system/tailscale/keys/id_ed25519_batocera %USERPROFILE%\\.ssh\\id_ed25519  # Password: linux${NC}"
+echo -e "${YELLOW}scp -P 2222 root@$LOCAL_IP:/userdata/system/tailscale/keys/id_ed25519_batocera %USERPROFILE%\\.ssh\\id_ed25519  # Password: linux${NC}"
+log "$CYAN" "   (If needed: ssh -p 2222 root@$LOCAL_IP to login with password 'linux')"
 log "$CYAN" "2. Test SSH (new terminal, Tailscale off if installed):"
-echo -e "${YELLOW}ssh root@$LOCAL_IP -p 2222${NC}"
-echo -e "${YELLOW}ssh root@$LOCAL_IP${NC}"
+echo -e "${YELLOW}ssh -i %USERPROFILE%\\.ssh\\id_ed25519 root@$LOCAL_IP -p 2223${NC}"
+echo -e "${YELLOW}ssh -i %USERPROFILE%\\.ssh\\id_ed25519 root@$LOCAL_IP${NC}"
 log "$CYAN" "3. If both work, type 'yes' below. If not, type 'no' and troubleshoot."
 read -rp "Did SSH key authentication work? (yes/no): " KEY_WORKS
 
@@ -132,14 +136,14 @@ if [[ "$KEY_WORKS" =~ ^[Yy]es$ ]]; then
     sed -i '/^PasswordAuth/d' "$DROPBEAR_CONF" 2>/dev/null || true
     echo "PasswordAuth no" >> "$DROPBEAR_CONF"
     log "$RED" "Password auth disabled—use SSH key after reboot."
-    pkill -f "dropbear.*2222" || true
+    pkill -f "dropbear.*222[2-3]" || true
     log "$CYAN" "4. Post-reboot, connect with:"
     echo -e "${YELLOW}ssh root@$LOCAL_IP  # Local IP${NC}"
     echo -e "${YELLOW}ssh root@$TAILSCALE_IP  # Tailscale IP (Tailscale on)${NC}"
     log "$CYAN" "Note: If Tailscale on your PC blocks local IP, turn it off or use the Tailscale IP."
 else
     log "$RED" "❌ SSH key not confirmed. Password auth remains."
-    pkill -f "dropbear.*2222" || true
+    pkill -f "dropbear.*222[2-3]" || true
     log "$CYAN" "Troubleshoot: Ensure key is copied to %USERPROFILE%\\.ssh\\id_ed25519 and SSH works."
 fi
 
