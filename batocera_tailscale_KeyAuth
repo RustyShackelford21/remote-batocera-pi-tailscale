@@ -1,6 +1,6 @@
 #!/bin/bash
 # Ultimate SSH Key & Tailscale Setup for Batocera
-# Version: 12.12 - Max Flair, Explicit Instructions, Samba Persistence
+# Version: 12.13 - Max Flair, Fixed Instructions, Samba Persistence
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -9,7 +9,6 @@ CYAN='\033[0;36m'
 MAGENTA='\033[0;35m'
 NC='\033[0m'
 
-# Fancy banner with magenta flair
 banner() {
     local text="$1"
     local width=60
@@ -19,7 +18,6 @@ banner() {
     echo -e "${BLUE}${border}${NC}"
 }
 
-# Progress spinner
 progress() {
     local duration=$1
     local message="$2"
@@ -35,10 +33,8 @@ progress() {
     echo -e "${GREEN} Done!${NC}"
 }
 
-# Log with timestamp
 log() { echo -e "${1}[$(date '+%Y-%m-%d %H:%M:%S')] ${2}${NC} ${MAGENTA}⚡${NC}"; }
 
-# Random password generator
 generate_random_password() { 
     echo -ne "${CYAN}Generating password...${NC}"
     head /dev/urandom | tr -dc 'A-Za-z0-9~!@#$%^&*()-_=+[]{};:,<.>/?' | head -c 32
@@ -123,16 +119,18 @@ done
 banner "Step 5/5: SSH Test Chamber"
 echo -e "${CYAN}Time to test your SSH key—follow these steps EXACTLY:${NC}"
 /usr/sbin/dropbear -p 2222 >/dev/null 2>&1 &
-log "$YELLOW" "1. Open a NEW PowerShell tab (Windows key + T, type 'powershell'): ⚡"
-log "$YELLOW" "2. Copy this EXACT command and paste it (right-click to paste): ⚡"
+log "$YELLOW" "1. Open a NEW PowerShell tab (Windows key + T, type 'powershell'):"
+log "$YELLOW" "2. Copy and paste this EXACT command (right-click to paste):"
 echo -e "${YELLOW}scp -P 2222 root@$LOCAL_IP:/userdata/system/tailscale/keys/id_ed25519_batocera C:\\Users\\$USER\\.ssh\\id_ed25519_batocera${NC}"
-log "$CYAN" "   - Password: 'linux' (type it when prompted).${NC}"
-log "$CYAN" "   - Linux/macOS: scp -P 2222 root@$LOCAL_IP:/userdata/system/tailscale/keys/id_ed25519_batocera ~/.ssh/id_ed25519_batocera${NC}"
-log "$YELLOW" "3. Test your SSH in the SAME PowerShell tab: ⚡"
+log "$CYAN" "   - Password: 'linux' (type it when prompted)."
+log "$CYAN" "   - Linux/macOS alternative:"
+echo -e "${CYAN}     scp -P 2222 root@$LOCAL_IP:/userdata/system/tailscale/keys/id_ed25519_batocera ~/.ssh/id_ed25519_batocera${NC}"
+log "$YELLOW" "3. Test your SSH in the SAME PowerShell tab:"
 echo -e "${YELLOW}ssh -i C:\\Users\\$USER\\.ssh\\id_ed25519_batocera root@$LOCAL_IP -p 2222${NC}"
-log "$CYAN" "   - Linux/macOS: ssh -i ~/.ssh/id_ed25519_batocera root@$LOCAL_IP -p 2222${NC}"
-log "$CYAN" "   - NOTE: If using local IP and Tailscale is running on your PC, exit Tailscale first!${NC}"
-log "$YELLOW" "4. If you connect (see 'root@BATOCERA'), type 'yes' below. If not, type 'no'. ⚡"
+log "$CYAN" "   - Linux/macOS alternative:"
+echo -e "${CYAN}     ssh -i ~/.ssh/id_ed25519_batocera root@$LOCAL_IP -p 2222${NC}"
+log "$CYAN" "   - NOTE: If using local IP and Tailscale is running on your PC, exit Tailscale first!"
+log "$YELLOW" "4. If you connect (see 'root@BATOCERA'), type 'yes' below. If not, type 'no':"
 read -rp "SSH test passed? (yes/no): " KEY_WORKS
 if [[ "$KEY_WORKS" =~ ^[Yy]es$ ]]; then
     log "$GREEN" "✅ SSH link established!"
@@ -185,8 +183,8 @@ log "$GREEN" "✅ System online—remote access activated!"
 log "$YELLOW" "Warp in after reboot with:"
 echo -e "${YELLOW}ssh -i C:\\Users\\$USER\\.ssh\\id_ed25519_batocera root@$LOCAL_IP${NC}"
 echo -e "${YELLOW}ssh -i C:\\Users\\$USER\\.ssh\\id_ed25519_batocera root@$TAILSCALE_IP${NC}"
-echo -e "${CYAN}   - Linux/macOS: Use ~/.ssh/ instead of C:\\Users\\$USER\\.ssh\\${NC}"
-echo -e "${CYAN}   - Locked out? SCP /userdata/key_backup.txt with old key or console.${NC}"
+echo -e "${CYAN}   - Linux/macOS: Use ~/.ssh/ instead of C:\\Users\\$USER\\.ssh\\"
+echo -e "${CYAN}   - Locked out? SCP /userdata/key_backup.txt with old key or console."
 log "$GREEN" "Reboot sequence starting in 5... 4... 3... 2... 1..."
 sleep 5
 reboot
