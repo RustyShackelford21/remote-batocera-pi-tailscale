@@ -1,7 +1,7 @@
 #!/bin/bash
 #
 # Ultimate SSH Key & Tailscale Setup for Batocera
-# Version: 11.2 - Fully Automated, Tailscale File Sharing, OpenSSH Key
+# Version: 11.3 - Fully Automated, Tailscale File Sharing, Dropbear Key, dropbear.conf fix
 #
 
 # --- Colors ---
@@ -47,8 +47,8 @@ read -rp "Enter your Tailscale auth key: " AUTH_KEY
 [[ -z "$AUTH_KEY" ]] && { log "$RED" "ERROR: Auth key required."; exit 1; }
 [[ ! "$AUTH_KEY" =~ ^tskey-auth- ]] && { log "$RED" "ERROR: Invalid auth key format."; exit 1; }
 
-read -rp "Enter a hostname (default: batocera-pi): " USER_HOSTNAME
-HOSTNAME="${USER_HOSTNAME:-batocera-pi}"
+read -rp "Enter a hostname (default: batocera-pi5): " USER_HOSTNAME
+HOSTNAME="${USER_HOSTNAME:-batocera-pi5}"
 
 read -rp "Enter your Tailscale tag (e.g., tag:ssh-batocera-1): " TAG
 [[ -z "$TAG" ]] && { log "$RED" "ERROR: Tag required."; exit 1; }
@@ -64,16 +64,34 @@ LOCAL_IP=$(ip -4 addr show | grep -oE "inet [0-9]+\.[0-9]+\.[0-9]+\.[0-9]+" | aw
 mkdir -p "$SSH_DIR" "$KEYS_DIR" /etc/dropbear
 chmod 700 "$SSH_DIR" "$KEYS_DIR" /etc/dropbear
 
-# --- Generate OpenSSH Key ---
+# --- Generate or Reuse SSH Key ---
+DROPBEAR_KEY="$SSH_DIR/id_dropbear"
 OPENSSH_KEY="$KEYS_DIR/id_ed25519_batocera"
-log "$GREEN" "🔑 Generating new OpenSSH key..."
-rm -f "$OPENSSH_KEY" "$OPENSSH_KEY.pub"  # Clear old keys, if any
-ssh-keygen -t ed25519 -f "$OPENSSH_KEY" -N "" || { log "$RED" "Key generation failed"; exit 1; }
+
+if [ ! -f "$DROPBEAR_KEY" ]; then
+    log "$GREEN" "🔑 Generating new SSH key..."
+    dropbearkey -t ed25519 -f "$DROPBEAR_KEY" || { log "$RED" "Key generation failed"; exit 1; }
+    chmod 600 "$DROPBEAR_KEY"
+    dropbearkey -y -f "$DROPBEAR_KEY" | grep "^ssh-ed25519" > /etc/dropbear/authorized_keys || { log "$RED" "Failed to extract public key"; exit 1; }
+    chmod 600 /etc/dropbear/authorized_keys
+else
+    log "$YELLOW" "⚠️ SSH key already exists. Reusing existing key."
+        # Key exists, but *ensure* the public key is in authorized_keys
+    dropbearkey -y -f "$DROPBEAR_KEY" | grep "^ssh-ed25519" > /etc/dropbear/authorized_keys || { log "$RED" "Failed to extract public key"; exit 1;}
+    chmod 600 /etc/dropbear/authorized_keys
+fi
+
+# --- Convert Key for OpenSSH Users ---
+dropbearconvert dropbear openssh "$SSH_DIR/id_dropbear" "$OPENSSH_KEY" || { log "$RED" "Key conversion failed"; exit 1; }
 chmod 600 "$OPENSSH_KEY"
 
-# Copy the public key to /etc/dropbear/authorized_keys
-cat "$OPENSSH_KEY.pub" > /etc/dropbear/authorized_keys
-chmod 600 /etc/dropbear/authorized_keys
+# --- Configure Dropbear (dropbear.conf) - Disable Password Auth ---
+log "$BLUE" "Configuring Dropbear..."
+DROPBEAR_CONF="/etc/dropbear/dropbear.conf"
+touch "$DROPBEAR_CONF" # Ensure it exists
+[[ ! -w "$DROPBEAR_CONF" ]] && { log "$RED" "ERROR: Cannot write to $DROPBEAR_CONF"; exit 1; }
+sed -i '/^PasswordAuth/d' "$DROPBEAR_CONF" 2>/dev/null || true  # Remove any existing line
+echo "PasswordAuth no" >> "$DROPBEAR_CONF"  # Disable password authentication
 
 # --- Save Overlay Early ---
 log "$BLUE" "Saving overlay to persist SSH config..."
@@ -136,7 +154,6 @@ if ! pgrep -f "$INSTALL_DIR/bin/tailscaled" > /dev/null; then
         $INSTALL_DIR/bin/tailscale --socket=$INSTALL_DIR/tailscaled.sock up --authkey="$AUTH_KEY" --hostname="$HOSTNAME" --advertise-tags="$TAG" --accept-routes
     fi
 fi
-ip route del 192.168.50.0/24 dev tailscale0 table 52 2>/dev/null || true
 EOF
 chmod +x /userdata/system/custom.sh
 
