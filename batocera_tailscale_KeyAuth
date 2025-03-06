@@ -1,7 +1,7 @@
 #!/bin/bash
 #
 # Ultimate SSH Key & Tailscale Setup for Batocera
-# Version: 12.5 - Fully Automated, Tailscale, SSH, Samba (iOS Compatible)
+# Version: 12.5 - Fully Automated, Tailscale File Sharing, Dropbear Key, Extra Flair
 #
 
 # --- Colors ---
@@ -10,12 +10,12 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 CYAN='\033[0;36m'
-MAGENTA='\033[0;35m'
+MAGENTA='\033[0;35m'  # Added Magenta
 NC='\033[0m'
 
 # --- Logging Function ---
 log() {
-    echo -e "<span class="math-inline">\{1\}\[</span>(date '+%Y-%m-%d %H:%M:%S')] <span class="math-inline">\{2\}</span>{NC}"
+    echo -e "<span class="math-inline">\{1\}\[</span>(date '+%Y-%m-%d %H:%M:%S')] <span class="math-inline">\{2\}</span>{NC} <span class="math-inline">\{MAGENTA\}⚡</span>{NC}"
 }
 
 # --- Configuration ---
@@ -24,8 +24,8 @@ INSTALL_DIR="/userdata/system/tailscale"
 SSH_DIR="/userdata/system/.ssh"
 KEYS_DIR="<span class="math-inline">INSTALL\_DIR/keys"
 LOCAL\_SSH\_PORT\="22"
-SAMBA\_CONF\="/etc/samba/smb\.conf" \# Correct path for Batocera
 \# \-\-\- Functions \-\-\-
+\# Generates a strong, random password
 generate\_random\_password\(\) \{
 head /dev/urandom \| tr \-dc A\-Za\-z0\-9\\\~\\\!\\@\\\#\\</span>\%\^\&\*\(\)-_\=\+\[\]\{\}\;\:\'\"\,\<\.\>\/\? | head -c 32
 }
@@ -224,4 +224,38 @@ if [[ "$OS" != "Unknown" ]]; then
 
     4. Move the downloaded key to your SSH directory:
        <span class="math-inline">\{YELLOW\}mv id\_ed25519\_batocera \~/\.ssh/id\_ed25519\_batocera</span>{NC}  (Linux/macOS/WSL)
-       ${YELLOW}Move-Item id_ed25519_
+       <span class="math-inline">\{YELLOW\}Move\-Item id\_ed25519\_batocera "</span>([Environment]::GetFolderPath("UserProfile"))\.ssh"${NC}  (Windows)
+
+    5. Set the correct permissions:
+       <span class="math-inline">\{YELLOW\}chmod 600 \~/\.ssh/id\_ed25519\_batocera</span>{NC} (Linux/macOS/WSL)
+       <span class="math-inline">\{YELLOW\}\# Windows\: Use File Explorer, Properties \-\> Security, or PowerShell commands\.</span>{NC}
+
+    6. *TEST* the SSH connection (in the *NEW* terminal):
+       ${YELLOW}ssh -i ~/.ssh/id_ed25519_batocera -p 2222 root@<span class="math-inline">LOCAL\_IP</span>{NC}
+
+    7. If the SSH connection works (you see 'root@batocera' prompt), type 'yes' below.
+       If it DOES NOT work, type 'no' and DO NOT REBOOT.
+EOF3
+else
+    echo "  Please use 'tailscale file get' to download your key, and then"
+    echo "  place it in the correct location for your system, and set permissions."
+fi
+read -rp "Did SSH key authentication work on port 2222? (yes/no): " KEY_WORKS
+
+if [[ "<span class="math-inline">KEY\_WORKS" \=\~ ^\[Yy\]es</span> ]]; then
+    log "<span class="math-inline">GREEN" "✅ SSH key confirmed\!"
+NEW\_PASSWORD\=</span>(generate_random_password())
+    echo "root:$NEW_PASSWORD" | chpasswd
+    log "$RED" "IMPORTANT: Root password reset to random value—use SSH key only."
+        # --- Restart Dropbear Safely ---
+    log "$BLUE" "Starting Dropbear with key auth on port 22..."
+    pkill -f dropbear || true
+    sleep 1
+    /usr/sbin/dropbear -s -p 22 || { log "$RED" "Dropbear start failed! Falling back..."; /usr/sbin/dropbear -p 22 || exit 1; }
+else
+    log "$RED" "❌ SSH key not confirmed. Password auth remains—troubleshoot."
+        pkill -f "dropbear.*2222" || true
+fi
+
+log "$BLUE" "Saving final overlay..."
+batocera-save-overlay > /dev/null 2>&1 && log "$GREEN" "✅ Final overlay saved."||
