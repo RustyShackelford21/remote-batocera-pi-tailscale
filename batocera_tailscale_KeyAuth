@@ -11,7 +11,7 @@ NC='\033[0m'
 log() { echo -e "${1}[$(date '+%Y-%m-%d %H:%M:%S')] ${2}${NC}"; }
 
 generate_random_password() {
-    head /dev/urandom | tr -dc A-Za-z0-9~!@#$%^&*()-_=+[]{};:,<.>/? | head -c 32
+    head /dev/urandom | tr -dc 'A-Za-z0-9~!@#$%^&*()-_=+\[\]{};:,<.>/?' | head -c 32
 }
 
 TAILSCALE_VERSION="1.80.2"
