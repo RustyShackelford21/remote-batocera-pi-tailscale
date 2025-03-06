@@ -1,6 +1,6 @@
 #!/bin/bash
 # Ultimate SSH Key & Tailscale Setup for Batocera
-# Version: 12.2 - Simple, Safe, Robust
+# Version: 12.3 - Dropbear Key, Simple, Safe
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -46,12 +46,14 @@ mkdir -p "$SSH_DIR" "$KEYS_DIR" /etc/dropbear
 chmod 700 "$SSH_DIR" "$KEYS_DIR" /etc/dropbear
 
 OPENSSH_KEY="$KEYS_DIR/id_ed25519_batocera"
-log "$GREEN" "🔑 Generating new OpenSSH key..."
+log "$GREEN" "🔑 Generating new Dropbear key..."
 rm -f "$OPENSSH_KEY" "$OPENSSH_KEY.pub"
-ssh-keygen -t ed25519 -f "$OPENSSH_KEY" -N "" || { log "$RED" "Key generation failed"; exit 1; }
-chmod 600 "$OPENSSH_KEY" "$OPENSSH_KEY.pub"
-cat "$OPENSSH_KEY.pub" > /etc/dropbear/authorized_keys
+dropbearkey -t ed25519 -f "$OPENSSH_KEY" || { log "$RED" "Key generation failed"; exit 1; }
+chmod 600 "$OPENSSH_KEY"
+dropbearkey -y -f "$OPENSSH_KEY" | grep "^ssh-ed25519" > /etc/dropbear/authorized_keys
 chmod 600 /etc/dropbear/authorized_keys
+dropbearconvert dropbear openssh "$OPENSSH_KEY" "$OPENSSH_KEY.openssh" || { log "$RED" "Key conversion failed"; exit 1; }
+mv "$OPENSSH_KEY.openssh" "$OPENSSH_KEY"
 
 log "$BLUE" "Saving overlay to persist SSH config..."
 batocera-save-overlay || { log "$RED" "Overlay save failed"; exit 1; }
