@@ -1,6 +1,6 @@
 #!/bin/bash
 # Ultimate SSH Key & Tailscale Setup for Batocera
-# Version: 12.17 - Clean Windows Instructions, Password Auth on 2222, Samba Persistence
+# Version: 12.18 - Robust Reboot, Tailscale Persistence, Clean Instructions
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -47,7 +47,7 @@ progress_indicator() {
 }
 
 clear
-banner "Batocera Tailscale & SSH Key Setup (v12.17)"
+banner "Batocera Tailscale & SSH Key Setup (v12.18)"
 echo -e "${CYAN}This script will guide you through setting up Tailscale and SSH key-based authentication on your Batocera system.${NC}"
 
 [ "$(id -u)" -ne 0 ] && { log "$RED" "ERROR: This script must be run as root. Use 'sudo bash $(basename "$0")'"; exit 1; }
@@ -80,8 +80,8 @@ log "$GREEN" "✅ Using Tailscale tag: $TAG"
 LOCAL_IP=$(ip -4 addr show | grep -oE "inet [0-9]+\.[0-9]+\.[0-9]+\.[0-9]+" | awk '{print $2}' | grep -v "127.0.0.1" | head -n 1)
 [[ -z "$LOCAL_IP" ]] && { log "$RED" "Could not determine local IP. You'll need to enter it manually later."; LOCAL_IP="<LOCAL_IP>"; } || log "$BLUE" "Detected local IP: $LOCAL_IP"
 
-mkdir -p "$SSH_DIR" "$KEYS_DIR" /etc/dropbear >/dev/null 2>&1
-chmod 700 "$SSH_DIR" "$KEYS_DIR" /etc/dropbear >/dev/null 2>&1
+mkdir -p "$SSH_DIR" "$KEYS_DIR" /etc/dropbear
+chmod 700 "$SSH_DIR" "$KEYS_DIR" /etc/dropbear
 
 DROPBEAR_KEY="$SSH_DIR/id_dropbear"
 OPENSSH_KEY="$KEYS_DIR/id_ed25519_batocera"
@@ -89,16 +89,16 @@ if [ ! -f "$DROPBEAR_KEY" ]; then
     log "$GREEN" "🔑 Generating new SSH key..."
     progress_indicator 3 "Forging SSH key"
     dropbearkey -t ed25519 -f "$DROPBEAR_KEY" || { log "$RED" "Key generation failed"; exit 1; }
-    chmod 600 "$DROPBEAR_KEY" >/dev/null 2>&1
+    chmod 600 "$DROPBEAR_KEY"
     dropbearkey -y -f "$DROPBEAR_KEY" | grep "^ssh-ed25519" > /etc/dropbear/authorized_keys || { log "$RED" "Failed to extract public key"; exit 1; }
-    chmod 600 /etc/dropbear/authorized_keys >/dev/null 2>&1
+    chmod 600 /etc/dropbear/authorized_keys
 else
     log "$YELLOW" "⚠️ SSH key already exists. Reusing existing key."
     dropbearkey -y -f "$DROPBEAR_KEY" | grep "^ssh-ed25519" > /etc/dropbear/authorized_keys || { log "$RED" "Failed to extract public key"; exit 1; }
-    chmod 600 /etc/dropbear/authorized_keys >/dev/null 2>&1
+    chmod 600 /etc/dropbear/authorized_keys
 fi
 dropbearconvert dropbear openssh "$DROPBEAR_KEY" "$OPENSSH_KEY" || { log "$RED" "Key conversion failed"; exit 1; }
-chmod 600 "$OPENSSH_KEY" >/dev/null 2>&1
+chmod 600 "$OPENSSH_KEY"
 
 log "$BLUE" "Configuring Dropbear..."
 DROPBEAR_CONF="/etc/dropbear/dropbear.conf"
@@ -108,19 +108,19 @@ sed -i '/^PasswordAuth/d' "$DROPBEAR_CONF" 2>/dev/null || true
 
 log "$BLUE" "Saving overlay to persist SSH config..."
 progress_indicator 2 "Saving overlay"
-batocera-save-overlay >/dev/null 2>&1 || { log "$RED" "Overlay save failed"; exit 1; }
+batocera-save-overlay || { log "$RED" "Overlay save failed"; exit 1; }
 
 log "$BLUE" "Installing Tailscale..."
 progress_indicator 5 "Downloading Tailscale"
-mkdir -p "$INSTALL_DIR/bin" >/dev/null 2>&1
+mkdir -p "$INSTALL_DIR/bin"
 wget -q -O "$INSTALL_DIR/tailscale.tgz" "https://pkgs.tailscale.com/stable/tailscale_${TAILSCALE_VERSION}_arm64.tgz" || { log "$RED" "Tailscale download failed."; exit 1; }
-tar -xzf "$INSTALL_DIR/tailscale.tgz" -C "$INSTALL_DIR/bin" --strip-components=1 >/dev/null 2>&1 || { log "$RED" "Tailscale extraction failed."; exit 1; }
-rm "$INSTALL_DIR/tailscale.tgz" >/dev/null 2>&1
-chmod +x "$INSTALL_DIR/bin/tailscale" "$INSTALL_DIR/bin/tailscaled" >/dev/null 2>&1
+tar -xzf "$INSTALL_DIR/tailscale.tgz" -C "$INSTALL_DIR/bin" --strip-components=1 || { log "$RED" "Tailscale extraction failed."; exit 1; }
+rm "$INSTALL_DIR/tailscale.tgz"
+chmod +x "$INSTALL_DIR/bin/tailscale" "$INSTALL_DIR/bin/tailscaled"
 
 log "$BLUE" "Starting Tailscale daemon..."
 progress_indicator 3 "Starting Tailscale"
-pkill -f "tailscaled" >/dev/null 2>&1 || true
+pkill -f "tailscaled" || true
 "$INSTALL_DIR/bin/tailscaled" --state="$INSTALL_DIR/tailscaled.state" --socket="$INSTALL_DIR/tailscaled.sock" --tun=userspace-networking > /tmp/tailscaled.log 2>&1 &
 sleep 10
 "$INSTALL_DIR/bin/tailscale" --socket="$INSTALL_DIR/tailscaled.sock" up --authkey="$AUTH_KEY" --hostname="$HOSTNAME" --advertise-tags="$TAG" --accept-routes > /tmp/tailscaled.log 2>&1 || { log "$RED" "Tailscale up failed"; exit 1; }
@@ -138,7 +138,7 @@ done
 
 banner "Almost There! Key Download and Testing"
 echo -e "${CYAN}Time to test your SSH key—follow these steps EXACTLY:${NC}"
-pkill -f "dropbear.*2222" >/dev/null 2>&1 || true
+pkill -f "dropbear.*2222" || true
 /usr/sbin/dropbear -p 2222 -B >/dev/null 2>&1 &
 log "$YELLOW" "1. Open a NEW PowerShell tab (Windows key + T, type 'powershell'):"
 log "$YELLOW" "2. Copy and paste this EXACT command (right-click to paste):"
@@ -160,16 +160,16 @@ if [[ "$KEY_WORKS" =~ ^[Yy]es$ ]]; then
     log "$GREEN" "✅ SSH key confirmed!"
     echo "PasswordAuth no" > /etc/dropbear/dropbear.conf
     NEW_PASSWORD=$(generate_random_password)
-    echo "root:$NEW_PASSWORD" | chpasswd >/dev/null 2>&1
+    echo "root:$NEW_PASSWORD" | chpasswd
     log "$RED" "IMPORTANT: Root password reset to random value—use SSH key only: $NEW_PASSWORD"
-    pkill -f "dropbear.*2222" >/dev/null 2>&1 || true
+    pkill -f "dropbear.*2222" || true
     log "$BLUE" "Starting Dropbear with key auth on port 22..."
     progress_indicator 2 "Locking SSH to port 22"
-    pkill -f "dropbear" >/dev/null 2>&1 || true
-    /usr/sbin/dropbear -s -p 22 >/dev/null 2>&1 || { log "$RED" "Dropbear start failed! Falling back..."; /usr/sbin/dropbear -p 22 || exit 1; }
+    pkill -f "dropbear" || true
+    /usr/sbin/dropbear -s -p 22 || { log "$RED" "Dropbear start failed! Falling back..."; /usr/sbin/dropbear -p 22 || exit 1; }
 else
     log "$RED" "❌ SSH key not confirmed. Password auth remains—troubleshoot."
-    pkill -f "dropbear.*2222" >/dev/null 2>&1 || true
+    pkill -f "dropbear.*2222" || true
     exit 1
 fi
 
@@ -190,15 +190,16 @@ pkill -f smbd || true
 [ -f /userdata/system/configs/smb.conf ] && smbd -D -s /userdata/system/configs/smb.conf
 sleep 1
 if ! pgrep -f "$INSTALL_DIR/bin/tailscaled" > /dev/null; then
-    $INSTALL_DIR/bin/tailscaled --state=$INSTALL_DIR/tailscaled.state --socket=$INSTALL_DIR/tailscaled.sock --tun=userspace-networking > /tmp/tailscaled.log 2>&1 &
+    $INSTALL_DIR/bin/tailscaled --state=$INSTALL_DIR/tailscaled.state --socket=$INSTALL_DIR/tailscaled.sock --tun=userspace-networking --verbose > /tmp/tailscaled.log 2>&1 &
     sleep 10
-    $INSTALL_DIR/bin/tailscale --socket=$INSTALL_DIR/tailscaled.sock up --hostname="$HOSTNAME" --advertise-tags="$TAG" --accept-routes > /tmp/tailscaled.log 2>&1
+    [ -f "$INSTALL_DIR/tailscaled.state" ] && $INSTALL_DIR/bin/tailscale --socket=$INSTALL_DIR/tailscaled.sock up --hostname="$HOSTNAME" --advertise-tags="$TAG" --accept-routes > /tmp/tailscaled.log 2>&1
 fi
 EOF
-chmod +x /userdata/system/custom.sh >/dev/null 2>&1
+chmod +x /userdata/system/custom.sh
+[ -f /userdata/system/custom.sh ] || { log "$RED" "ERROR: Failed to create /userdata/system/custom.sh"; exit 1; }
 
 log "$BLUE" "Saving final overlay..."
-batocera-save-overlay >/dev/null 2>&1 && log "$GREEN" "✅ Final overlay saved." || { log "$RED" "Overlay save failed"; exit 1; }
+batocera-save-overlay && log "$GREEN" "✅ Final overlay saved." || { log "$RED" "Overlay save failed"; exit 1; }
 
 banner "Installation Complete!"
 log "$GREEN" "✅ System configured! You can now connect via SSH using your key."
@@ -209,4 +210,5 @@ log "$CYAN" "   - Replace <YourUsername> with your Windows username (e.g., 'Will
 log "$CYAN" "   - Linux/macOS: Use ~/.ssh/ instead of C:\\Users\\<YourUsername>\\.ssh\\"
 log "$GREEN" "Rebooting in 5... 4... 3... 2... 1..."
 sleep 5
-reboot
+sync
+reboot -f
