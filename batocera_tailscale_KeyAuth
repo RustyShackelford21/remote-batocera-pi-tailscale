@@ -1,6 +1,6 @@
 #!/bin/bash
 # Ultimate SSH Key & Tailscale Setup for Batocera
-# Version: 12.19 - Fixed Tailscale Verbose Flag, Socket Symlink, Clean Instructions
+# Version: 12.19 - Fixed Tailscale Verbose Flag, Socket Symlink, SSH Config Tip
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -214,6 +214,12 @@ echo "ssh -i C:\\Users\\<YourUsername>\\.ssh\\id_ed25519_batocera root@$LOCAL_IP
 echo "ssh -i C:\\Users\\<YourUsername>\\.ssh\\id_ed25519_batocera root@$TAILSCALE_IP"
 log "$CYAN" "   - Replace <YourUsername> with your Windows username (e.g., 'Willi')."
 log "$CYAN" "   - Linux/macOS: Use ~/.ssh/ instead of C:\\Users\\<YourUsername>\\.ssh\\"
+log "$CYAN" "   - TIP: Simplify SSH by adding this to C:\\Users\\<YourUsername>\\.ssh\\config (create if needed):"
+echo "Host batocera-tailscale"
+echo "    HostName $TAILSCALE_IP"
+echo "    User root"
+echo "    IdentityFile C:\\Users\\<YourUsername>\\.ssh\\id_ed25519_batocera"
+log "$CYAN" "   - Then just run: ssh batocera-tailscale"
 log "$GREEN" "Rebooting in 5... 4... 3... 2... 1..."
 sleep 5
 sync
