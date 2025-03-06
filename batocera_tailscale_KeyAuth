@@ -1,6 +1,6 @@
 #!/bin/bash
 # Ultimate SSH Key & Tailscale Setup for Batocera
-# Version: 12.23 - Refined SCP, Permissions, Pre-Reboot Test
+# Version: 12.23 - Refined SCP, Config Emphasis, Pre-Reboot Test
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -135,26 +135,35 @@ done
 [[ -z "$TAILSCALE_IP" ]] && { log "$YELLOW" "⚠️ No Tailscale IP."; TAILSCALE_IP="$LOCAL_IP"; } || log "$GREEN" "✅ Tailscale IP: $TAILSCALE_IP"
 
 banner "Key Download and Testing"
-echo -e "${CYAN}Download and test your SSH key:${NC}"
-log "$YELLOW" "1. Open a new terminal (PowerShell: Win + T, 'powershell'):"
+echo -e "${CYAN}Download and test your SSH key—follow these steps EXACTLY:${NC}"
+log "$YELLOW" "1. Open a NEW terminal (PowerShell: Win + T, 'powershell'; Linux/macOS: any terminal):"
 log "$BLUE" "Starting Dropbear on 2222 (password mode)..."
 pkill -f "dropbear.*2222" || true
 /usr/sbin/dropbear -p 2222 || { log "$RED" "Dropbear failed on 2222."; exit 1; }
 sleep 5
-log "$YELLOW" "2. Copy-paste to download key:"
+log "$YELLOW" "2. Download the SSH key—copy-paste this in your new terminal:"
 echo "scp -P 2222 root@$LOCAL_IP:/userdata/system/tailscale/keys/id_ed25519_batocera \"C:\\\\Users\\\\\$(powershell.exe -NoProfile -Command 'Write-Output \$env:USERNAME')\\\\.ssh\\\\id_ed25519_batocera\""
 log "$CYAN" "   - Windows: Auto-detects username."
-log "$CYAN" "   - Password: 'linux'."
-log "$CYAN" "   - Manual: scp -P 2222 root@$LOCAL_IP:/userdata/system/tailscale/keys/id_ed25519_batocera C:\\Users\\<YourUsername>\\.ssh\\id_ed25519_batocera"
+log "$CYAN" "   - Password: 'linux' (type it when prompted)."
+log "$CYAN" "   - Manual alternative: scp -P 2222 root@$LOCAL_IP:/userdata/system/tailscale/keys/id_ed25519_batocera C:\\Users\\<YourUsername>\\.ssh\\id_ed25519_batocera"
 log "$CYAN" "   - Linux/macOS: scp -P 2222 root@$LOCAL_IP:/userdata/system/tailscale/keys/id_ed25519_batocera ~/.ssh/id_ed25519_batocera"
-log "$YELLOW" "3. Fix perms (Windows):"
+log "$YELLOW" "3. Fix key permissions (Windows only—copy-paste this):"
 echo "icacls \"C:\\\\Users\\\\\$(powershell.exe -NoProfile -Command 'Write-Output \$env:USERNAME')\\\\.ssh\\\\id_ed25519_batocera\" /inheritance:r /grant:r \"\$(powershell.exe -NoProfile -Command 'Write-Output \$env:USERNAME'):F\""
-log "$YELLOW" "4. Test SSH:"
+log "$YELLOW" "4. Set up SSH config—REQUIRED for easy access (create/edit C:\\Users\\<YourUsername>\\.ssh\\config):"
+echo "Host batocera-tailscale $TAILSCALE_IP"
+echo "    HostName $TAILSCALE_IP"
+echo "    User root"
+echo "    IdentityFile C:\\Users\\<YourUsername>\\\.ssh\\id_ed25519_batocera"
+log "$CYAN" "   - Replace <YourUsername> with your username (e.g., 'Willi')."
+log "$CYAN" "   - Linux/macOS: Use ~/.ssh/ instead of C:\\Users\\<YourUsername>\\.ssh\\"
+log "$CYAN" "   - IMPORTANT: This lets you run 'ssh batocera-tailscale' or 'ssh root@$TAILSCALE_IP' without extra flags."
+log "$CYAN" "   - Steps: Open notepad, paste the above (replace <YourUsername>), save as 'config' in ~/.ssh/"
+log "$YELLOW" "5. Test SSH—copy-paste this in your new terminal:"
 echo "ssh -i \"C:\\\\Users\\\\\$(powershell.exe -NoProfile -Command 'Write-Output \$env:USERNAME')\\\\.ssh\\\\id_ed25519_batocera\" root@$LOCAL_IP -p 2222"
 log "$CYAN" "   - Manual: ssh -i C:\\Users\\<YourUsername>\\.ssh\\id_ed25519_batocera root@$LOCAL_IP -p 2222"
 log "$CYAN" "   - Linux/macOS: ssh -i ~/.ssh/id_ed25519_batocera root@$LOCAL_IP -p 2222"
-log "$CYAN" "   - NOTE: Exit Tailscale on PC if using local IP."
-log "$YELLOW" "5. If 'root@BATOCERA', type 'yes':"
+log "$CYAN" "   - NOTE: If using local IP and Tailscale runs on your PC, exit Tailscale first."
+log "$YELLOW" "6. If you see 'root@BATOCERA', type 'yes' below:"
 read -rp "Did SSH work on 2222? (yes/no): " KEY_WORKS
 
 if [[ "$KEY_WORKS" =~ ^[Yy]es$ ]]; then
@@ -173,10 +182,11 @@ else
     exit 1
 fi
 
-log "$YELLOW" "Final test: In a new terminal, run:"
+log "$YELLOW" "Final test—confirm SSH works before reboot:"
 echo "ssh -i \"C:\\\\Users\\\\\$(powershell.exe -NoProfile -Command 'Write-Output \$env:USERNAME')\\\\.ssh\\\\id_ed25519_batocera\" root@$LOCAL_IP"
 log "$CYAN" "   - Manual: ssh -i C:\\Users\\<YourUsername>\\.ssh\\id_ed25519_batocera root@$LOCAL_IP"
 log "$CYAN" "   - Linux/macOS: ssh -i ~/.ssh/id_ed25519_batocera root@$LOCAL_IP"
+log "$CYAN" "   - With config: ssh batocera-tailscale OR ssh root@$TAILSCALE_IP"
 read -rp "Did SSH work? (yes/no): " SSH_WORKS
 [[ "$SSH_WORKS" =~ ^[Nn]o$ ]] && { log "$RED" "❌ SSH failed—reboot canceled."; exit 1; }
 
@@ -201,7 +211,7 @@ sleep 1
 mkdir -p /var/run/tailscale
 ln -sf $INSTALL_DIR/tailscaled.sock /var/run/tailscale/tailscaled.sock
 if ! pgrep -f "$INSTALL_DIR/bin/tailscaled" > /dev/null; then
-    $INSTALL_DIR/bin/tailscaled --state=$INSTALL_DIR/tailscaled.state --socket=$INSTALL_DIR/tailscaled.sock --tun=userspace-networking --verbose=1 > /tmp/tailscaled.log 2>&1 &
+    $INSTALL_DIR/bin/tailscaled --state=$INSTALL_DIR/tailsenalscaled.state --socket=$INSTALL_DIR/tailscaled.sock --tun=userspace-networking --verbose=1 > /tmp/tailscaled.log 2>&1 &
     sleep 10
     [ -f "$INSTALL_DIR/tailscaled.state" ] && $INSTALL_DIR/bin/tailscale --socket=$INSTALL_DIR/tailscaled.sock up --hostname="$HOSTNAME" --advertise-tags="$TAG" --accept-routes > /tmp/tailscaled.log 2>&1
 fi
@@ -214,18 +224,11 @@ batocera-save-overlay && log "$GREEN" "✅ Overlay saved." || { log "$RED" "Over
 
 banner "Installation Complete!"
 log "$GREEN" "✅ Setup complete!"
-log "$YELLOW" "SSH commands:"
+log "$YELLOW" "SSH commands (if config not set):"
 echo "ssh -i C:\\Users\\<YourUsername>\\.ssh\\id_ed25519_batocera root@$LOCAL_IP"
 echo "ssh -i C:\\Users\\<YourUsername>\\.ssh\\id_ed25519_batocera root@$TAILSCALE_IP"
-log "$CYAN" "   - Replace <YourUsername>."
-log "$CYAN" "   - Linux/macOS: ~/.ssh/..."
-log "$CYAN" "   - Optional ~/.ssh/config:"
-echo "Host batocera-tailscale"
-echo "    HostName $TAILSCALE_IP"
-echo "    User root"
-echo "    IdentityFile C:\\Users\\<YourUsername>\\.ssh\\id_ed25519_batocera"
-log "$CYAN" "   - Then: ssh batocera-tailscale"
-log "$CYAN" "   - Windows agent: powershell.exe -NoProfile -Command \"Start-SshAgent -Quiet; ssh-add C:\\\\Users\\\\\$(powershell.exe -NoProfile -Command 'Write-Output \$env:USERNAME')\\\\.ssh\\\\id_ed25519_batocera\""
+log "$CYAN" "   - With config (recommended): ssh batocera-tailscale OR ssh root@$TAILSCALE_IP"
+log "$CYAN" "   - Optional agent (Windows): powershell.exe -Command \"Set-Service ssh-agent -StartupType Automatic; Start-Service ssh-agent; ssh-add C:\\\\Users\\\\\$(powershell.exe -NoProfile -Command 'Write-Output \$env:USERNAME')\\\\.ssh\\\\id_ed25519_batocera\""
 log "$CYAN" "   - Linux/macOS: eval \$(ssh-agent -s); ssh-add ~/.ssh/id_ed25519_batocera"
 log "$GREEN" "Rebooting in 5..."
 sleep 5
