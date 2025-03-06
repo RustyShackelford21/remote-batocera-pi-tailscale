@@ -1,6 +1,6 @@
 #!/bin/bash
 # Ultimate SSH Key & Tailscale Setup for Batocera
-# Version: 12.20 - Fixed Tag Logic, Tailscale Error Logging, SSH Config Tip
+# Version: 12.21 - Safe Dropbear Restart, No Passwd, SSH Config Tip
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -47,7 +47,7 @@ progress_indicator() {
 }
 
 clear
-banner "Batocera Tailscale & SSH Key Setup (v12.20)"
+banner "Batocera Tailscale & SSH Key Setup (v12.21)"
 echo -e "${CYAN}This script will guide you through setting up Tailscale and SSH key-based authentication on your Batocera system.${NC}"
 
 [ "$(id -u)" -ne 0 ] && { log "$RED" "ERROR: This script must be run as root. Use 'sudo bash $(basename "$0")'"; exit 1; }
@@ -161,16 +161,13 @@ read -rp "Did SSH key authentication work on port 2222? (yes/no): " KEY_WORKS
 if [[ "$KEY_WORKS" =~ ^[Yy]es$ ]]; then
     log "$GREEN" "✅ SSH key confirmed!"
     echo "PasswordAuth no" > /etc/dropbear/dropbear.conf
-    NEW_PASSWORD=$(generate_random_password)
-    echo "$NEW_PASSWORD" > /tmp/newpass
-    passwd root < /tmp/newpass
-    rm /tmp/newpass
-    log "$RED" "IMPORTANT: Root password reset to random value—use SSH key only: $NEW_PASSWORD"
-    pkill -f "dropbear.*2222" || true
     log "$BLUE" "Starting Dropbear with key auth on port 22..."
     progress_indicator 2 "Locking SSH to port 22"
-    pkill -f "dropbear" || true
-    /usr/sbin/dropbear -s -p 22 || { log "$RED" "Dropbear start failed! Falling back..."; /usr/sbin/dropbear -p 22 || exit 1; }
+    if ! pgrep -f "dropbear.*-p 22" > /dev/null; then
+        pkill -f "dropbear" || true
+        sleep 1
+        /usr/sbin/dropbear -s -p 22 || { log "$RED" "Dropbear start failed! Falling back..."; /usr/sbin/dropbear -p 22 || exit 1; }
+    fi
 else
     log "$RED" "❌ SSH key not confirmed. Password auth remains—troubleshoot."
     pkill -f "dropbear.*2222" || true
@@ -187,9 +184,11 @@ ip link set wlan0 up
 iptables -F INPUT
 iptables -P INPUT ACCEPT
 iptables -A INPUT -p tcp --dport 22 -j ACCEPT
-pkill -f dropbear || true
-sleep 1
-/usr/sbin/dropbear -s -p 22
+if ! pgrep -f "dropbear.*-p 22" > /dev/null; then
+    pkill -f dropbear || true
+    sleep 1
+    /usr/sbin/dropbear -s -p 22 || echo "Dropbear failed to start" >> /tmp/custom.log
+fi
 pkill -f smbd || true
 [ -f /userdata/system/configs/smb.conf ] && smbd -D -s /userdata/system/configs/smb.conf
 sleep 1
@@ -223,4 +222,4 @@ log "$CYAN" "   - Then just run: ssh batocera-tailscale"
 log "$GREEN" "Rebooting in 5... 4... 3... 2... 1..."
 sleep 5
 sync
-reboot -f
+reboot -f || reboot
