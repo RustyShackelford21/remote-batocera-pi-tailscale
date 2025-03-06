@@ -1,17 +1,45 @@
 #!/bin/bash
 # Ultimate SSH Key & Tailscale Setup for Batocera
-# Version: 12.3 - Dropbear Key, Simple, Safe
+# Version: 12.10 - Max Flair Edition
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 CYAN='\033[0;36m'
+PURPLE='\033[0;35m'
 NC='\033[0m'
 
-log() { echo -e "${1}[$(date '+%Y-%m-%d %H:%M:%S')] ${2}${NC}"; }
+# Fancy banner with gradient flair
+banner() {
+    echo -e "${BLUE}========================================${NC}"
+    echo -e "${YELLOW}  $1${NC} ${PURPLE}✨${NC}"
+    echo -e "${BLUE}========================================${NC}"
+}
 
-generate_random_password() {
+# Enhanced progress bar with spinner
+progress() {
+    local duration=$1
+    local message=$2
+    local spin=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
+    local i=0
+    echo -ne "${CYAN}$message ["
+    for ((t=0; t<duration*10; t++)); do
+        echo -ne "\b${spin[i]}"
+        i=$(( (i+1) % 10 ))
+        sleep 0.1
+    done
+    echo -ne "\b${GREEN}✓${NC}]"
+    echo -e "${GREEN} Done!${NC}"
+}
+
+# Log with timestamp and flair
+log() { echo -e "${1}[$(date '+%Y-%m-%d %H:%M:%S')] ${2}${NC} ${PURPLE}⚡${NC}"; }
+
+# Random password generator with flair
+generate_random_password() { 
+    echo -ne "${CYAN}Generating password...${NC}"
     head /dev/urandom | tr -dc 'A-Za-z0-9~!@#$%^&*()-_=+\[\]{};:,<.>/?' | head -c 32
+    echo -e "${GREEN} ✓${NC}"
 }
 
 TAILSCALE_VERSION="1.80.2"
@@ -21,58 +49,69 @@ KEYS_DIR="$INSTALL_DIR/keys"
 LOCAL_SSH_PORT="22"
 
 clear
-echo -e "${YELLOW}Tailscale & SSH Key Setup for Batocera${NC}"
-[ "$(id -u)" -ne 0 ] && { log "$RED" "Must be root."; exit 1; }
+banner "Batocera Tailscale & SSH Setup - Retro Edition"
+echo -e "${CYAN}Powering up secure remote access with Tailscale and SSH keys!${NC}"
+echo -e "${PURPLE}Ready for a smooth ride? Let’s roll!${NC}"
+[ "$(id -u)" -ne 0 ] && { log "$RED" "ERROR: Gotta run as root—use 'sudo bash script.sh'."; exit 1; }
 
-log "$BLUE" "Ensuring TUN device exists..."
-modprobe tun
-mkdir -p /dev/net
-[ ! -c /dev/net/tun ] && mknod /dev/net/tun c 10 200 && chmod 600 /dev/net/tun
+# Step 1: TUN Setup
+log "$BLUE" "Step 1/5: Prepping the Network Core..."
+progress 2 "Initializing TUN device"
+modprobe tun >/dev/null 2>&1
+mkdir -p /dev/net >/dev/null 2>&1
+[ ! -c /dev/net/tun ] && mknod /dev/net/tun c 10 200 && chmod 600 /dev/net/tun >/dev/null 2>&1
+log "$GREEN" "✅ Network core online!"
 
-read -rp "Enter your Tailscale auth key: " AUTH_KEY
-[[ -z "$AUTH_KEY" || ! "$AUTH_KEY" =~ ^tskey-auth- ]] && { log "$RED" "ERROR: Invalid auth key."; exit 1; }
-read -rp "Enter a hostname (default: batocera-pi): " USER_HOSTNAME
+# Step 2: User Inputs
+banner "Step 2/5: Your Mission Details"
+echo -e "${CYAN}We need your Tailscale key and a cool name for your Pi.${NC}"
+read -rp "Enter your Tailscale auth key (grab it from tailscale.com): " AUTH_KEY
+[[ -z "$AUTH_KEY" || ! "$AUTH_KEY" =~ ^tskey-auth- ]] && { log "$RED" "ERROR: Invalid key—needs 'tskey-auth-' prefix."; exit 1; }
+read -rp "Pick a hostname (hit Enter for 'batocera-pi'): " USER_HOSTNAME
 HOSTNAME="${USER_HOSTNAME:-batocera-pi}"
-read -rp "Enter your Tailscale tag (e.g., tag:ssh-batocera-1): " TAG
-[[ -z "$TAG" ]] && { log "$RED" "ERROR: Tag required."; exit 1; }
-log "$GREEN" "✅ Using hostname: $HOSTNAME"
-log "$GREEN" "✅ Using Tailscale tag: $TAG"
-
+read -rp "Set a Tailscale tag (e.g., 'tag:ssh-batocera-1', required): " TAG
+[[ -z "$TAG" ]] && { log "$RED" "ERROR: Tag can’t be blank—try 'tag:ssh-batocera-1'."; exit 1; }
+log "$GREEN" "✅ Locked in hostname: $HOSTNAME"
+log "$GREEN" "✅ Locked in tag: $TAG"
 LOCAL_IP=$(ip -4 addr show | grep -oE "inet [0-9]+\.[0-9]+\.[0-9]+\.[0-9]+" | awk '{print $2}' | grep -v "127.0.0.1" | head -n 1)
-[[ -z "$LOCAL_IP" ]] && { log "$RED" "ERROR: Could not determine local IP."; exit 1; }
-log "$BLUE" "Detected local IP: $LOCAL_IP"
+[[ -z "$LOCAL_IP" ]] && { log "$RED" "ERROR: Can’t find local IP—check your network."; exit 1; }
+log "$BLUE" "Local IP detected: $LOCAL_IP"
 
-mkdir -p "$SSH_DIR" "$KEYS_DIR" /etc/dropbear
-chmod 700 "$SSH_DIR" "$KEYS_DIR" /etc/dropbear
-
+# Step 3: SSH Key Generation
+banner "Step 3/5: Forging Your SSH Key"
+echo -e "${CYAN}Crafting a secure key for password-free SSH access...${NC}"
+progress 3 "Forging key in the digital forge"
+mkdir -p "$SSH_DIR" "$KEYS_DIR" /etc/dropbear >/dev/null 2>&1
+chmod 700 "$SSH_DIR" "$KEYS_DIR" /etc/dropbear >/dev/null 2>&1
 OPENSSH_KEY="$KEYS_DIR/id_ed25519_batocera"
-log "$GREEN" "🔑 Generating new Dropbear key..."
-rm -f "$OPENSSH_KEY" "$OPENSSH_KEY.pub"
-dropbearkey -t ed25519 -f "$OPENSSH_KEY" || { log "$RED" "Key generation failed"; exit 1; }
-chmod 600 "$OPENSSH_KEY"
-dropbearkey -y -f "$OPENSSH_KEY" | grep "^ssh-ed25519" > /etc/dropbear/authorized_keys
-chmod 600 /etc/dropbear/authorized_keys
-dropbearconvert dropbear openssh "$OPENSSH_KEY" "$OPENSSH_KEY.openssh" || { log "$RED" "Key conversion failed"; exit 1; }
-mv "$OPENSSH_KEY.openssh" "$OPENSSH_KEY"
+rm -f "$OPENSSH_KEY" "$OPENSSH_KEY.pub" >/dev/null 2>&1
+dropbearkey -t ed25519 -f "$OPENSSH_KEY" >/dev/null 2>&1 || { log "$RED" "ERROR: Key forging failed."; exit 1; }
+chmod 600 "$OPENSSH_KEY" >/dev/null 2>&1
+dropbearkey -y -f "$OPENSSH_KEY" | grep "^ssh-ed25519" > /etc/dropbear/authorized_keys 2>/dev/null
+chmod 600 /etc/dropbear/authorized_keys >/dev/null 2>&1
+dropbearconvert dropbear openssh "$OPENSSH_KEY" "$OPENSSH_KEY.openssh" >/dev/null 2>&1 || { log "$RED" "ERROR: Key conversion glitch."; exit 1; }
+mv "$OPENSSH_KEY.openssh" "$OPENSSH_KEY" >/dev/null 2>&1
+log "$GREEN" "✅ Key forged at $OPENSSH_KEY"
+progress 2 "Securing key in vault"
+batocera-save-overlay >/dev/null 2>&1 || { log "$RED" "ERROR: Vault save failed."; exit 1; }
+log "$GREEN" "✅ Key vault secured!"
 
-log "$BLUE" "Saving overlay to persist SSH config..."
-batocera-save-overlay || { log "$RED" "Overlay save failed"; exit 1; }
-
-mkdir -p "$INSTALL_DIR/bin"
-wget -q -O "$INSTALL_DIR/tailscale.tgz" "https://pkgs.tailscale.com/stable/tailscale_${TAILSCALE_VERSION}_arm64.tgz" || { log "$RED" "Tailscale download failed."; exit 1; }
-tar -xzf "$INSTALL_DIR/tailscale.tgz" -C "$INSTALL_DIR/bin" --strip-components=1 || { log "$RED" "Tailscale extraction failed."; exit 1; }
-rm "$INSTALL_DIR/tailscale.tgz"
-chmod +x "$INSTALL_DIR/bin/tailscale" "$INSTALL_DIR/bin/tailscaled"
-
-log "$BLUE" "Starting Tailscale daemon..."
-pkill -f "tailscaled" || true
+# Step 4: Tailscale Setup
+banner "Step 4/5: Launching Tailscale Warp Drive"
+echo -e "${CYAN}Installing Tailscale for warp-speed remote access...${NC}"
+progress 5 "Beaming Tailscale aboard"
+mkdir -p "$INSTALL_DIR/bin" >/dev/null 2>&1
+wget -q -O "$INSTALL_DIR/tailscale.tgz" "https://pkgs.tailscale.com/stable/tailscale_${TAILSCALE_VERSION}_arm64.tgz" || { log "$RED" "ERROR: Warp drive download failed."; exit 1; }
+tar -xzf "$INSTALL_DIR/tailscale.tgz" -C "$INSTALL_DIR/bin" --strip-components=1 >/dev/null 2>&1 || { log "$RED" "ERROR: Warp core breach during extraction."; exit 1; }
+rm "$INSTALL_DIR/tailscale.tgz" >/dev/null 2>&1
+chmod +x "$INSTALL_DIR/bin/tailscale" "$INSTALL_DIR/bin/tailscaled" >/dev/null 2>&1
+progress 3 "Engaging warp engines"
+pkill -f "tailscaled" >/dev/null 2>&1 || true
 "$INSTALL_DIR/bin/tailscaled" --state="$INSTALL_DIR/tailscaled.state" --socket="$INSTALL_DIR/tailscaled.sock" --tun=userspace-networking > /tmp/tailscaled.log 2>&1 &
 sleep 10
-"$INSTALL_DIR/bin/tailscale" --socket="$INSTALL_DIR/tailscaled.sock" up --authkey="$AUTH_KEY" --hostname="$HOSTNAME" --advertise-tags="$TAG" --accept-routes > /tmp/tailscaled.log 2>&1 || { log "$RED" "Tailscale up failed"; exit 1; }
+"$INSTALL_DIR/bin/tailscale" --socket="$INSTALL_DIR/tailscaled.sock" up --authkey="$AUTH_KEY" --hostname="$HOSTNAME" --advertise-tags="$TAG" --accept-routes > /tmp/tailscaled.log 2>&1 || { log "$RED" "ERROR: Warp jump failed."; exit 1; }
 sleep 10
 ip route del 192.168.50.0/24 dev tailscale0 table 52 2>/dev/null || true
-
-log "$BLUE" "Waiting for Tailscale IP assignment..."
 TRIES=0
 TAILSCALE_IP=""
 while [[ -z "$TAILSCALE_IP" && $TRIES -lt 10 ]]; do
@@ -80,38 +119,38 @@ while [[ -z "$TAILSCALE_IP" && $TRIES -lt 10 ]]; do
     TAILSCALE_IP=$("$INSTALL_DIR/bin/tailscale" --socket="$INSTALL_DIR/tailscaled.sock" ip -4 2>/dev/null)
     ((TRIES++))
 done
-[[ -z "$TAILSCALE_IP" ]] && { log "$YELLOW" "⚠️ Tailscale IP not assigned."; TAILSCALE_IP="$LOCAL_IP"; } || log "$GREEN" "✅ Tailscale IP: $TAILSCALE_IP"
+[[ -z "$TAILSCALE_IP" ]] && { log "$YELLOW" "⚠️ Warp IP not locked—using local IP."; TAILSCALE_IP="$LOCAL_IP"; } || log "$GREEN" "✅ Warp IP locked: $TAILSCALE_IP"
 
-log "$BLUE" "Starting temporary Dropbear on port 2222 with password auth..."
-/usr/sbin/dropbear -p 2222 &
-
-log "$GREEN" "✅ Setup Complete (Phase 1)!"
-log "$YELLOW" "⚠️ Test SSH key on port 2222 BEFORE proceeding."
-log "$CYAN" "1. Copy the SSH key to your PC via Tailscale (new terminal):"
-echo -e "${YELLOW}tailscale file cp $OPENSSH_KEY C:\\Users\\Willi\\.ssh\\id_ed25519_batocera:${NC}"
-log "$CYAN" "   (Or: scp root@$LOCAL_IP:$OPENSSH_KEY C:\\Users\\Willi\\.ssh\\id_ed25519_batocera  # Password: linux)${NC}"
-log "$CYAN" "2. Test SSH (new terminal):"
-echo -e "${YELLOW}ssh -i C:\\Users\\Willi\\.ssh\\id_ed25519_batocera root@$LOCAL_IP -p 2222${NC}"
-log "$CYAN" "3. If it works, type 'yes'. If not, type 'no'."
-read -rp "Did SSH key authentication work? (yes/no): " KEY_WORKS
-
+# Step 5: SSH Test and Finalize
+banner "Step 5/5: SSH Test Chamber"
+echo -e "${CYAN}Test your key on a temp port (2222) to secure the system:${NC}"
+/usr/sbin/dropbear -p 2222 >/dev/null 2>&1 &
+log "$YELLOW" "1. Beam the key to your machine:"
+echo -e "${YELLOW}scp root@$LOCAL_IP:$OPENSSH_KEY ~/.ssh/id_ed25519_batocera${NC}  # Password: linux"
+echo -e "${CYAN}   - Windows: scp root@$LOCAL_IP:$OPENSSH_KEY C:\\Users\\YourUsername\\.ssh\\id_ed25519_batocera${NC}"
+log "$YELLOW" "2. Test your SSH link (new terminal):"
+echo -e "${YELLOW}ssh -i ~/.ssh/id_ed25519_batocera root@$LOCAL_IP -p 2222${NC}"
+echo -e "${CYAN}   - Windows: ssh -i C:\\Users\\YourUsername\\.ssh\\id_ed25519_batocera root@$LOCAL_IP -p 2222${NC}"
+log "$YELLOW" "3. Connected? Type 'yes'. Trouble? Type 'no'."
+read -rp "SSH test passed? (yes/no): " KEY_WORKS
 if [[ "$KEY_WORKS" =~ ^[Yy]es$ ]]; then
-    log "$GREEN" "✅ SSH key confirmed!"
+    log "$GREEN" "✅ SSH link established!"
     echo "PasswordAuth no" > /etc/dropbear/dropbear.conf
     NEW_PASS=$(generate_random_password)
-    echo "root:$NEW_PASS" | chpasswd
-    log "$RED" "Password auth disabled, root password reset to: $NEW_PASS (save this!)"
-    pkill -f "dropbear.*2222" || true
-    log "$BLUE" "Restarting Dropbear on port 22 with key auth..."
-    pkill -f "dropbear.*22" || true
-    /usr/sbin/dropbear -s -p 22 &
+    echo "root:$NEW_PASS" | chpasswd >/dev/null 2>&1
+    log "$RED" "Password auth zapped! New root pass: $NEW_PASS (save it!)"
+    pkill -f "dropbear.*2222" >/dev/null 2>&1 || true
+    progress 2 "Locking SSH to port 22"
+    pkill -f "dropbear.*22" >/dev/null 2>&1 || true
+    /usr/sbin/dropbear -s -p 22 >/dev/null 2>&1 &
 else
-    log "$RED" "❌ SSH key failed. Keeping password auth."
-    pkill -f "dropbear.*2222" || true
+    log "$RED" "❌ SSH link down—keeping password auth (use 'linux')."
+    pkill -f "dropbear.*2222" >/dev/null 2>&1 || true
     exit 1
 fi
 
-log "$BLUE" "Setting up persistence..."
+# Persistence
+progress 3 "Saving galaxy state"
 cat > /userdata/system/custom.sh <<EOF
 #!/bin/sh
 mkdir -p /dev/net
@@ -131,8 +170,16 @@ if ! pgrep -f "$INSTALL_DIR/bin/tailscaled" > /dev/null; then
     ip route del 192.168.50.0/24 dev tailscale0 table 52 2>/dev/null || true
 fi
 EOF
-chmod +x /userdata/system/custom.sh
+chmod +x /userdata/system/custom.sh >/dev/null 2>&1
+batocera-save-overlay >/dev/null 2>&1 || { log "$RED" "ERROR: Galaxy save failed."; exit 1; }
 
-log "$BLUE" "Saving final overlay..."
-batocera-save-overlay || { log "$RED" "Overlay save failed"; exit 1; }
-log "$GREEN" "✅ Setup Complete! Reboot now with 'reboot'."
+# Final Output
+banner "Mission Accomplished!"
+log "$GREEN" "✅ System online—remote access activated!"
+log "$YELLOW" "Warp in after reboot with:"
+echo -e "${YELLOW}ssh -i ~/.ssh/id_ed25519_batocera root@$LOCAL_IP${NC}"
+echo -e "${YELLOW}ssh -i ~/.ssh/id_ed25519_batocera root@$TAILSCALE_IP${NC}"
+echo -e "${CYAN}   - Windows: Use C:\\Users\\YourUsername\\.ssh\\ instead of ~/.ssh/${NC}"
+log "$GREEN" "Reboot sequence starting in 5... 4... 3... 2... 1..."
+sleep 5
+reboot
