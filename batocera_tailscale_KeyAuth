@@ -1,6 +1,6 @@
 #!/bin/bash
 # Ultimate SSH Key & Tailscale Setup for Batocera
-# Version: 12.21 - Safe Dropbear Restart, No Passwd, SSH Config Tip
+# Version: 12.21 - Safe Dropbear Restart, Clear SCP/SSH Config Instructions
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -18,10 +18,6 @@ INSTALL_DIR="/userdata/system/tailscale"
 SSH_DIR="/userdata/system/.ssh"
 KEYS_DIR="$INSTALL_DIR/keys"
 LOCAL_SSH_PORT="22"
-
-generate_random_password() {
-    head /dev/urandom | tr -dc 'A-Za-z0-9~!@#$%^&*()-_=+[]{};:,<.>/?' | head -c 32
-}
 
 banner() {
     local text="$1"
@@ -139,22 +135,26 @@ done
 [[ -z "$TAILSCALE_IP" ]] && { log "$YELLOW" "⚠️ Tailscale IP not assigned after 30s. Using Local IP."; TAILSCALE_IP="$LOCAL_IP"; } || log "$GREEN" "✅ Tailscale IP: $TAILSCALE_IP"
 
 banner "Almost There! Key Download and Testing"
-echo -e "${CYAN}Time to test your SSH key—follow these steps EXACTLY:${NC}"
+echo -e "${CYAN}Time to download your SSH key and test it—follow these steps EXACTLY:${NC}"
+log "$YELLOW" "1. Open a NEW terminal on your PC (e.g., PowerShell: Windows key + T, type 'powershell'):"
+log "$YELLOW" "2. Copy and paste this EXACT command to download the SSH key (right-click to paste):"
+echo "scp -P 2222 root@$LOCAL_IP:/userdata/system/tailscale/keys/id_ed25519_batocera C:\\Users\\<YourUsername>\\.ssh\\id_ed25519_batocera"
+log "$CYAN" "   - Replace <YourUsername> with your username (e.g., 'Willi')."
+log "$CYAN" "   - Password: 'linux' (type it when prompted)."
+log "$CYAN" "   - Linux/macOS alternative: scp -P 2222 root@$LOCAL_IP:/userdata/system/tailscale/keys/id_ed25519_batocera ~/.ssh/id_ed25519_batocera"
+log "$YELLOW" "3. Test your SSH key in the SAME terminal:"
+echo "ssh -i C:\\Users\\<YourUsername>\\.ssh\\id_ed25519_batocera root@$LOCAL_IP -p 2222"
+log "$CYAN" "   - Replace <YourUsername> with your username (e.g., 'Willi')."
+log "$CYAN" "   - Linux/macOS alternative: ssh -i ~/.ssh/id_ed25519_batocera root@$LOCAL_IP -p 2222"
+log "$CYAN" "   - NOTE: If using local IP and Tailscale is running on your PC, exit Tailscale first!"
+log "$CYAN" "   - TIP: For easy SSH later, add this to C:\\Users\\<YourUsername>\\.ssh\\config (create if needed):"
+echo "Host batocera-tailscale"
+echo "    HostName $TAILSCALE_IP"
+echo "    User root"
+echo "    IdentityFile C:\\Users\\<YourUsername>\\.ssh\\id_ed25519_batocera"
+log "$CYAN" "   - Then you can just run: ssh batocera-tailscale"
 pkill -f "dropbear.*2222" || true
 /usr/sbin/dropbear -p 2222 -B >/dev/null 2>&1 &
-log "$YELLOW" "1. Open a NEW PowerShell tab (Windows key + T, type 'powershell'):"
-log "$YELLOW" "2. Copy and paste this EXACT command (right-click to paste):"
-echo "scp -P 2222 root@$LOCAL_IP:/userdata/system/tailscale/keys/id_ed25519_batocera C:\\Users\\<YourUsername>\\.ssh\\id_ed25519_batocera"
-log "$CYAN" "   - Replace <YourUsername> with your Windows username (e.g., 'Willi')."
-log "$CYAN" "   - Password: 'linux' (type it when prompted)."
-log "$CYAN" "   - Linux/macOS alternative:"
-echo "     scp -P 2222 root@$LOCAL_IP:/userdata/system/tailscale/keys/id_ed25519_batocera ~/.ssh/id_ed25519_batocera"
-log "$YELLOW" "3. Test your SSH in the SAME PowerShell tab:"
-echo "ssh -i C:\\Users\\<YourUsername>\\.ssh\\id_ed25519_batocera root@$LOCAL_IP -p 2222"
-log "$CYAN" "   - Replace <YourUsername> with your Windows username (e.g., 'Willi')."
-log "$CYAN" "   - Linux/macOS alternative:"
-echo "     ssh -i ~/.ssh/id_ed25519_batocera root@$LOCAL_IP -p 2222"
-log "$CYAN" "   - NOTE: If using local IP and Tailscale is running on your PC, exit Tailscale first!"
 log "$YELLOW" "4. If you connect (see 'root@BATOCERA'), type 'yes' below. If not, type 'no':"
 read -rp "Did SSH key authentication work on port 2222? (yes/no): " KEY_WORKS
 
@@ -211,14 +211,14 @@ log "$GREEN" "✅ System configured! You can now connect via SSH using your key.
 log "$YELLOW" "Final SSH connection commands (use these after reboot):"
 echo "ssh -i C:\\Users\\<YourUsername>\\.ssh\\id_ed25519_batocera root@$LOCAL_IP"
 echo "ssh -i C:\\Users\\<YourUsername>\\.ssh\\id_ed25519_batocera root@$TAILSCALE_IP"
-log "$CYAN" "   - Replace <YourUsername> with your Windows username (e.g., 'Willi')."
+log "$CYAN" "   - Replace <YourUsername> with your username (e.g., 'Willi')."
 log "$CYAN" "   - Linux/macOS: Use ~/.ssh/ instead of C:\\Users\\<YourUsername>\\.ssh\\"
-log "$CYAN" "   - TIP: Simplify SSH by adding this to C:\\Users\\<YourUsername>\\.ssh\\config (create if needed):"
+log "$CYAN" "   - For easy SSH, ensure your ~/.ssh/config has:"
 echo "Host batocera-tailscale"
 echo "    HostName $TAILSCALE_IP"
 echo "    User root"
 echo "    IdentityFile C:\\Users\\<YourUsername>\\.ssh\\id_ed25519_batocera"
-log "$CYAN" "   - Then just run: ssh batocera-tailscale"
+log "$CYAN" "   - Then run: ssh batocera-tailscale"
 log "$GREEN" "Rebooting in 5... 4... 3... 2... 1..."
 sleep 5
 sync
