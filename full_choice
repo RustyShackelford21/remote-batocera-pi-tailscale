@@ -1,6 +1,6 @@
 #!/bin/bash
 # Ultimate Batocera Tailscale & SSH Setup (Menu Version)
-# Version: 14.1 - Interactive Menu, Key Detection with Choice, SSH Test Clarity, Samba Persistence, Subnet Routing
+# Version: 14.3 - Auto-Detect Latest Tailscale, Connection Check, Improved Error Handling, Pre-Reboot Confirmation
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -13,7 +13,6 @@ log() {
     echo -e "${1}[$(date '+%Y-%m-%d %H:%M:%S')] ${2}${NC} ${MAGENTA}⚡${NC}"
 }
 
-TAILSCALE_VERSION="1.80.2"
 INSTALL_DIR="/userdata/system/tailscale"
 SSH_DIR="/userdata/system/.ssh"
 KEYS_DIR="$INSTALL_DIR/keys"
@@ -48,12 +47,36 @@ progress_indicator() {
 [ "$(id -u)" -ne 0 ] && { log "$RED" "ERROR: Run as root."; exit 1; }
 
 clear
-banner "Batocera Tailscale & SSH Setup (v14.1)"
+banner "Batocera Tailscale & SSH Setup (v14.3)"
 echo -e "${CYAN}Setup Tailscale, SSH (password or key), Samba file sharing, and optional subnet routing.${NC}"
+
+# Check internet connection
+if ! ping -c 3 8.8.8.8 &>/dev/null; then
+    log "$RED" "ERROR: No internet connection detected. Connect to the internet and try again."
+    exit 1
+fi
+
+# Check if curl is installed
+if ! command -v curl &>/dev/null; then
+    log "$RED" "ERROR: curl is not installed. Please install it and rerun the script."
+    exit 1
+fi
+
+# Detect latest Tailscale version
+log "$BLUE" "Detecting latest Tailscale stable version for arm64..."
+progress_indicator 2 "Fetching version"
+LATEST_VERSION=$(curl -s "https://pkgs.tailscale.com/stable/" | grep -oP 'tailscale_\K[0-9]+\.[0-9]+\.[0-9]+(?=_arm64\.tgz)' | sort -V | tail -n 1)
+if [[ -z "$LATEST_VERSION" ]]; then
+    log "$RED" "ERROR: Could not fetch latest Tailscale version—falling back to 1.80.2."
+    TAILSCALE_VERSION="1.80.2"
+else
+    TAILSCALE_VERSION="$LATEST_VERSION"
+    log "$GREEN" "✅ Latest version detected: $TAILSCALE_VERSION"
+fi
 
 # Prompt for Tailscale Auth Key
 log "$YELLOW" "Step 1: Tailscale Setup"
-read -rp "Enter your Tailscale auth key (get it from https://login.tailscale.com/admin/settings/keys): " AUTH_KEY
+read -rp "Enter your Tailscale auth key (from https://login.tailscale.com/admin/settings/keys): " AUTH_KEY
 [[ -z "$AUTH_KEY" ]] && { log "$RED" "ERROR: Auth key required."; exit 1; }
 [[ ! "$AUTH_KEY" =~ ^tskey-auth- ]] && { log "$RED" "ERROR: Invalid auth key format."; exit 1; }
 
@@ -173,7 +196,7 @@ else
 fi
 
 # Tailscale Installation
-log "$BLUE" "Installing Tailscale..."
+log "$BLUE" "Installing Tailscale $TAILSCALE_VERSION..."
 progress_indicator 5 "Downloading Tailscale"
 mkdir -p "$INSTALL_DIR/bin"
 wget -q -O "$INSTALL_DIR/tailscale.tgz" "https://pkgs.tailscale.com/stable/tailscale_${TAILSCALE_VERSION}_arm64.tgz" || { log "$RED" "Download failed."; exit 1; }
@@ -192,6 +215,12 @@ TAILSCALE_ARGS="--authkey=$AUTH_KEY --hostname=$HOSTNAME --advertise-tags=$TAG -
 [[ "$SUBNET_ENABLE" == "yes" ]] && TAILSCALE_ARGS="$TAILSCALE_ARGS --advertise-routes=$SUBNET"
 "$INSTALL_DIR/bin/tailscale" --socket="$INSTALL_DIR/tailscaled.sock" up $TAILSCALE_ARGS > /tmp/tailscaled.log 2>&1 || { log "$RED" "Tailscale failed:"; cat /tmp/tailscaled.log; exit 1; }
 sleep 5
+
+# Verify Tailscale is Running
+if ! "$INSTALL_DIR/bin/tailscale" --socket="$INSTALL_DIR/tailscaled.sock" status &>/dev/null; then
+    log "$RED" "ERROR: Tailscale is not running. Check logs with 'cat /tmp/tailscaled.log'"
+    exit 1
+fi
 
 # Get Tailscale IP
 log "$BLUE" "Waiting for Tailscale IP..."
@@ -296,6 +325,18 @@ chmod +x /userdata/system/custom.sh
 
 log "$BLUE" "Saving overlay..."
 batocera-save-overlay && log "$GREEN" "✅ Overlay saved." || { log "$RED" "Overlay failed."; exit 1; }
+
+# Final Confirmation Before Reboot
+log "$YELLOW" "Setup complete! Review settings before reboot:"
+echo -e "${CYAN}Tailscale Version: $TAILSCALE_VERSION${NC}"
+echo -e "${CYAN}Tailscale IP: $TAILSCALE_IP${NC}"
+echo -e "${CYAN}SSH Authentication Mode: $AUTH_MODE${NC}"
+[[ "$SUBNET_ENABLE" == "yes" ]] && echo -e "${CYAN}Subnet Routing: $SUBNET${NC}"
+read -rp "Ready to reboot? (yes/no): " REBOOT_CONFIRM
+if [[ "$REBOOT_CONFIRM" != "yes" ]]; then
+    log "$RED" "Reboot canceled—review settings manually."
+    exit 1
+fi
 
 # Completion Message
 banner "Setup Complete!"
