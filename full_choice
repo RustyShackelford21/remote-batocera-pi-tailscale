@@ -1,6 +1,6 @@
 #!/bin/bash
 # Ultimate Batocera Tailscale & SSH Setup (Menu Version)
-# Version: 14.0 - Interactive Menu, Auto SSH Detection, SSH Config, Samba Persistence, Subnet Routing
+# Version: 14.1 - Interactive Menu, Key Detection with Choice, SSH Test Clarity, Samba Persistence, Subnet Routing
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -48,7 +48,7 @@ progress_indicator() {
 [ "$(id -u)" -ne 0 ] && { log "$RED" "ERROR: Run as root."; exit 1; }
 
 clear
-banner "Batocera Tailscale & SSH Setup (v14.0)"
+banner "Batocera Tailscale & SSH Setup (v14.1)"
 echo -e "${CYAN}Setup Tailscale, SSH (password or key), Samba file sharing, and optional subnet routing.${NC}"
 
 # Prompt for Tailscale Auth Key
@@ -76,16 +76,15 @@ fi
 # SSH Authentication Mode Selection
 log "$YELLOW" "Step 2: SSH Authentication"
 if [ -f "$DROPBEAR_KEY" ]; then
-    log "$GREEN" "✅ SSH key found! Using key authentication."
-    AUTH_MODE="key"
+    log "$GREEN" "✅ SSH key detected—key authentication recommended."
 else
-    log "$YELLOW" "No SSH key detected."
-    echo "Choose your SSH authentication method:"
-    echo "1) Password (default: root/linux)"
-    echo "2) Key-based authentication (recommended for security)"
-    read -rp "Select an option (1/2): " SSH_CHOICE
-    [[ "$SSH_CHOICE" == "2" ]] && AUTH_MODE="key" || AUTH_MODE="password"
+    log "$YELLOW" "No SSH key detected—will generate one if you choose key auth."
 fi
+echo "Choose your SSH authentication method:"
+echo "1) Password (default: root/linux)"
+echo "2) Key-based authentication (recommended for security)"
+read -rp "Select an option (1/2): " SSH_CHOICE
+[[ "$SSH_CHOICE" == "2" ]] && AUTH_MODE="key" || AUTH_MODE="password"
 
 # Subnet Routing Option
 log "$YELLOW" "Step 3: Subnet Routing"
@@ -255,6 +254,7 @@ if [[ "$AUTH_MODE" == "key" ]]; then
     echo "ssh batocera-tailscale  # Or: ssh -i \"C:\\\\Users\\\\\$(powershell.exe -NoProfile -Command 'Write-Output \$env:USERNAME')\\\\.ssh\\\\id_ed25519_batocera\" root@$LOCAL_IP"
     log "$CYAN" "   - Linux/macOS: ssh -i ~/.ssh/id_ed25519_batocera root@$LOCAL_IP"
     log "$CYAN" "   - iOS: Termius, IP ($LOCAL_IP), port 22."
+    log "$CYAN" "   - NOTE: Ensure Tailscale is ENABLED on your PC for this test (unlike local IP tests where it’s off)."
     read -rp "Did SSH work? (yes/no): " SSH_WORKS
     [[ "$SSH_WORKS" =~ ^[Nn]o$ ]] && { log "$RED" "❌ SSH failed—reboot canceled."; exit 1; }
 fi
