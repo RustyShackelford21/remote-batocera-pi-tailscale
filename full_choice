@@ -1,6 +1,6 @@
 #!/bin/bash
 # Ultimate Batocera Tailscale & SSH Setup (Menu Version)
-# Version: 15.1 - Enhanced Exit Node Features, Speed Testing, ACL Instructions, and Exit Node Management
+# Version: 14.4 - Auto-Detect Latest Tailscale, Connection Check, Improved Error Handling, Fixed Reboot
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -43,132 +43,12 @@ progress_indicator() {
     echo -e "\b${GREEN}✓${NC}"
 }
 
-# Internet speed test function
-test_internet_speed() {
-    log "$BLUE" "Testing internet connection speed..."
-    progress_indicator 3 "Downloading test file"
-    
-    # Download a 10MB test file and measure speed in Mbps
-    START_TIME=$(date +%s.%N)
-    curl -s -o /dev/null https://speed.cloudflare.com/__down?bytes=10000000
-    END_TIME=$(date +%s.%N)
-    
-    # Calculate download time and speed in Mbps
-    DURATION=$(echo "$END_TIME - $START_TIME" | bc)
-    SPEED_MBPS=$(echo "10 * 8 / $DURATION" | bc -l | xargs printf "%.2f")
-    
-    if (( $(echo "$SPEED_MBPS < 5" | bc -l) )); then
-        log "$YELLOW" "⚠️ Warning: Your internet connection is slow (${SPEED_MBPS} Mbps)"
-        log "$YELLOW" "Exit nodes perform best with speeds of at least 5 Mbps."
-        log "$YELLOW" "Devices using this exit node will be limited to this speed."
-        return 1
-    else
-        log "$GREEN" "✅ Internet speed: ${SPEED_MBPS} Mbps (good for exit node)"
-        return 0
-    fi
-}
-
-# Create exit node manager script
-create_exitnode_manager() {
-    mkdir -p "$INSTALL_DIR/tools"
-    cat > "$INSTALL_DIR/tools/exitnode-manager.sh" <<EOF
-#!/bin/bash
-# Tailscale Exit Node Manager for Batocera
-
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-CYAN='\033[0;36m'
-NC='\033[0m'
-
-INSTALL_DIR="/userdata/system/tailscale"
-TAILSCALE="\$INSTALL_DIR/bin/tailscale"
-SOCKET="\$INSTALL_DIR/tailscaled.sock"
-
-echo -e "\${BLUE}=====================================\${NC}"
-echo -e "\${CYAN}   Tailscale Exit Node Manager   \${NC}"
-echo -e "\${BLUE}=====================================\${NC}"
-
-# Check if Tailscale is running
-if ! pgrep -f "tailscaled" > /dev/null; then
-    echo -e "\${RED}Error: Tailscale is not running.\${NC}"
-    echo "Please restart Tailscale first."
-    exit 1
-fi
-
-# Check current exit node status
-CURRENT_STATUS=\$(\$TAILSCALE --socket=\$SOCKET status --json | grep -o '"ExitNodeOption":[^,]*' | cut -d':' -f2 | tr -d '"')
-if [[ "\$CURRENT_STATUS" == "true" ]]; then
-    echo -e "\${GREEN}Exit node is currently: ENABLED\${NC}"
-else
-    echo -e "\${YELLOW}Exit node is currently: DISABLED\${NC}"
-fi
-
-echo
-echo "Select an option:"
-echo "1) Enable exit node"
-echo "2) Disable exit node"
-echo "3) Check status"
-echo "4) Exit"
-read -rp "Enter your choice (1-4): " CHOICE
-
-case \$CHOICE in
-    1)
-        echo -e "\${BLUE}Enabling exit node...\${NC}"
-        echo 1 > /proc/sys/net/ipv4/ip_forward
-        \$TAILSCALE --socket=\$SOCKET up --advertise-exit-node
-        if [ \$? -eq 0 ]; then
-            echo -e "\${GREEN}Exit node enabled successfully.\${NC}"
-            echo -e "\${YELLOW}Remember to approve this in the Tailscale admin console.\${NC}"
-            # Save setting for persistence
-            sed -i 's/EXIT_NODE_ENABLE="no"/EXIT_NODE_ENABLE="yes"/' /userdata/system/custom.sh
-            batocera-save-overlay
-        else
-            echo -e "\${RED}Failed to enable exit node.\${NC}"
-        fi
-        ;;
-    2)
-        echo -e "\${BLUE}Disabling exit node...\${NC}"
-        \$TAILSCALE --socket=\$SOCKET up --exit-node=
-        if [ \$? -eq 0 ]; then
-            echo -e "\${GREEN}Exit node disabled successfully.\${NC}"
-            # Save setting for persistence
-            sed -i 's/EXIT_NODE_ENABLE="yes"/EXIT_NODE_ENABLE="no"/' /userdata/system/custom.sh
-            batocera-save-overlay
-        else
-            echo -e "\${RED}Failed to disable exit node.\${NC}"
-        fi
-        ;;
-    3)
-        # Show detailed status
-        echo -e "\${BLUE}Current Tailscale status:\${NC}"
-        \$TAILSCALE --socket=\$SOCKET status
-        ;;
-    4)
-        echo "Exiting..."
-        exit 0
-        ;;
-    *)
-        echo -e "\${RED}Invalid option. Please try again.\${NC}"
-        ;;
-esac
-EOF
-    chmod +x "$INSTALL_DIR/tools/exitnode-manager.sh"
-    log "$GREEN" "✅ Exit node manager created: $INSTALL_DIR/tools/exitnode-manager.sh"
-    
-    # Create convenience symlink in /usr/local/bin
-    mkdir -p /usr/local/bin
-    ln -sf "$INSTALL_DIR/tools/exitnode-manager.sh" /usr/local/bin/exitnode-manager
-    chmod +x /usr/local/bin/exitnode-manager
-}
-
 # Ensure script is run as root
 [ "$(id -u)" -ne 0 ] && { log "$RED" "ERROR: Run as root."; exit 1; }
 
 clear
-banner "Batocera Tailscale & SSH Setup (v15.1)"
-echo -e "${CYAN}Setup Tailscale, SSH (password or key), Samba file sharing, subnet routing, and exit node.${NC}"
+banner "Batocera Tailscale & SSH Setup (v14.4)"
+echo -e "${CYAN}Setup Tailscale, SSH (password or key), Samba file sharing, and optional subnet routing.${NC}"
 
 # Check internet connection
 if ! ping -c 3 8.8.8.8 &>/dev/null; then
@@ -255,59 +135,8 @@ else
     SUBNET_ENABLE="no"
 fi
 
-# Exit Node Option
-log "$YELLOW" "Step 4: Exit Node Configuration"
-echo "Configure this device as a Tailscale exit node?"
-echo "This allows other Tailscale devices to route all internet traffic through this device."
-echo "1) No (default)"
-echo "2) Yes - For everyone in my network"
-echo "3) Yes - Only for specific tagged devices"
-read -rp "Select an option (1/2/3): " EXIT_NODE_CHOICE
-
-if [[ "$EXIT_NODE_CHOICE" == "2" || "$EXIT_NODE_CHOICE" == "3" ]]; then
-    # Test internet speed before proceeding
-    test_internet_speed
-    SPEED_OK=$?
-    
-    if [[ $SPEED_OK -eq 1 ]]; then
-        read -rp "Continue with exit node setup despite slow speed? (yes/no): " CONTINUE_ANYWAY
-        [[ "$CONTINUE_ANYWAY" != "yes" ]] && { 
-            log "$YELLOW" "Exit node setup cancelled due to slow internet speed."
-            EXIT_NODE_ENABLE="no"
-            EXIT_NODE_MODE="none"
-        }
-    fi
-    
-    if [[ "$EXIT_NODE_ENABLE" != "no" ]]; then
-        # Enable IP forwarding for exit node
-        log "$BLUE" "Enabling IP forwarding for exit node..."
-        echo 1 > /proc/sys/net/ipv4/ip_forward
-        
-        # Set exit node options based on choice
-        EXIT_NODE_ENABLE="yes"
-        
-        if [[ "$EXIT_NODE_CHOICE" == "3" ]]; then
-            EXIT_NODE_MODE="tagged"
-            log "$BLUE" "Setting up tagged exit node..."
-            log "$YELLOW" "You'll need to configure Tailscale ACLs to control which devices can use this exit node."
-        else
-            EXIT_NODE_MODE="everyone"
-        fi
-        
-        # Create exit node manager script
-        create_exitnode_manager
-        
-        # Inform user about Tailscale admin approval
-        log "$YELLOW" "IMPORTANT: You must also enable exit nodes in your Tailscale admin console."
-        log "$CYAN" "Visit https://login.tailscale.com/admin/acls and ensure exit nodes are allowed."
-    fi
-else
-    EXIT_NODE_ENABLE="no"
-    EXIT_NODE_MODE="none"
-fi
-
 # Get Local IP
-LOCAL_IP=$(ip -4 addr show | grep -oE "inet [0-9]+\.[0-9]+\.[0-9]+" | awk '{print $2}' | grep -v "127.0.0.1" | head -n 1)
+LOCAL_IP=$(ip -4 addr show | grep -oE "inet [0-9]+\.[0-9]+\.[0-9]+\.[0-9]+" | awk '{print $2}' | grep -v "127.0.0.1" | head -n 1)
 [[ -z "$LOCAL_IP" ]] && { log "$RED" "ERROR: Local IP not found."; LOCAL_IP="<LOCAL_IP>"; } || log "$BLUE" "Local IP: $LOCAL_IP"
 
 # SSH Key Setup (if key mode)
@@ -384,17 +213,6 @@ ln -sf "$INSTALL_DIR/tailscaled.sock" /var/run/tailscale/tailscaled.sock
 sleep 10
 TAILSCALE_ARGS="--authkey=$AUTH_KEY --hostname=$HOSTNAME --advertise-tags=$TAG --accept-routes"
 [[ "$SUBNET_ENABLE" == "yes" ]] && TAILSCALE_ARGS="$TAILSCALE_ARGS --advertise-routes=$SUBNET"
-
-# Add exit node configuration if enabled
-if [[ "$EXIT_NODE_ENABLE" == "yes" ]]; then
-    if [[ "$EXIT_NODE_MODE" == "tagged" ]]; then
-        # Fix: Use a separate parameter for the tag-specific exit node flag
-        TAILSCALE_ARGS="$TAILSCALE_ARGS --advertise-exit-node"
-    else
-        TAILSCALE_ARGS="$TAILSCALE_ARGS --advertise-exit-node"
-    fi
-fi
-
 "$INSTALL_DIR/bin/tailscale" --socket="$INSTALL_DIR/tailscaled.sock" up $TAILSCALE_ARGS > /tmp/tailscaled.log 2>&1 || { log "$RED" "Tailscale failed:"; cat /tmp/tailscaled.log; exit 1; }
 sleep 5
 
@@ -465,7 +283,7 @@ if [[ "$AUTH_MODE" == "key" ]]; then
     echo "ssh batocera-tailscale  # Or: ssh -i \"C:\\\\Users\\\\\$(powershell.exe -NoProfile -Command 'Write-Output \$env:USERNAME')\\\\.ssh\\\\id_ed25519_batocera\" root@$LOCAL_IP"
     log "$CYAN" "   - Linux/macOS: ssh -i ~/.ssh/id_ed25519_batocera root@$LOCAL_IP"
     log "$CYAN" "   - iOS: Termius, IP ($LOCAL_IP), port 22."
-    log "$CYAN" "   - NOTE: Ensure Tailscale is ENABLED on your PC for this test (unlike local IP tests where it's off)."
+    log "$CYAN" "   - NOTE: Ensure Tailscale is ENABLED on your PC for this test (unlike local IP tests where it’s off)."
     read -rp "Did SSH work? (yes/no): " SSH_WORKS
     [[ "$SSH_WORKS" =~ ^[Nn]o$ ]] && { log "$RED" "❌ SSH failed—reboot canceled."; exit 1; }
 fi
@@ -483,12 +301,6 @@ iptables -P INPUT ACCEPT
 iptables -A INPUT -p tcp --dport 22 -j ACCEPT
 iptables -A INPUT -p tcp --dport 445 -j ACCEPT
 iptables -A INPUT -p udp --dport 137-139 -j ACCEPT
-
-# Enable IP forwarding (for exit node)
-if [[ "$EXIT_NODE_ENABLE" == "yes" ]]; then
-    echo 1 > /proc/sys/net/ipv4/ip_forward
-fi
-
 if ! pgrep -f "dropbear.*-p 22" > /dev/null; then
     pkill -f dropbear || true
     sleep 1
@@ -501,12 +313,6 @@ if ! pgrep -f "$INSTALL_DIR/bin/tailscaled" > /dev/null; then
     sleep 10
     TAILSCALE_ARGS="--hostname=$HOSTNAME --advertise-tags=$TAG --accept-routes"
     [[ "$SUBNET_ENABLE" == "yes" ]] && TAILSCALE_ARGS="\$TAILSCALE_ARGS --advertise-routes=$SUBNET"
-    
-    # Add exit node configuration if enabled
-    if [[ "$EXIT_NODE_ENABLE" == "yes" ]]; then
-        TAILSCALE_ARGS="\$TAILSCALE_ARGS --advertise-exit-node"
-    fi
-    
     [ -f "$INSTALL_DIR/tailscaled.state" ] && $INSTALL_DIR/bin/tailscale --socket=$INSTALL_DIR/tailscaled.sock up \$TAILSCALE_ARGS > /tmp/tailscaled.log 2>&1
 fi
 sleep 15
@@ -526,18 +332,12 @@ echo -e "${CYAN}Tailscale Version: $TAILSCALE_VERSION${NC}"
 echo -e "${CYAN}Tailscale IP: $TAILSCALE_IP${NC}"
 echo -e "${CYAN}SSH Authentication Mode: $AUTH_MODE${NC}"
 [[ "$SUBNET_ENABLE" == "yes" ]] && echo -e "${CYAN}Subnet Routing: $SUBNET${NC}"
-if [[ "$EXIT_NODE_ENABLE" == "yes" ]]; then
-    echo -e "${CYAN}Exit Node Enabled: Yes (Mode: ${EXIT_NODE_MODE})${NC}"
-fi
 read -rp "Ready to reboot? (yes/no): " REBOOT_CONFIRM
 if [[ "$REBOOT_CONFIRM" != "yes" ]]; then
     log "$RED" "Reboot canceled—review settings manually."
     exit 1
 fi
 
-# Completion Message
-banner "Setup Complete!"
-log "$GREEN" "
 # Completion Message
 banner "Setup Complete!"
 log "$GREEN" "✅ Tailscale & SSH configured!"
@@ -552,51 +352,6 @@ log "$YELLOW" "Samba access (read/write):"
 log "$CYAN" "   - Local: smb://$LOCAL_IP/share"
 log "$CYAN" "   - Tailscale: smb://$TAILSCALE_IP/share"
 [[ "$SUBNET_ENABLE" == "yes" ]] && log "$YELLOW" "Subnet routing enabled: Approve $SUBNET in Tailscale Admin."
-
-# Exit Node Instructions
-if [[ "$EXIT_NODE_ENABLE" == "yes" ]]; then
-    log "$YELLOW" "Exit Node enabled! To use it:"
-    log "$CYAN" "   1. Approve this device as an exit node in Tailscale admin"
-    log "$CYAN" "   2. On client devices:"
-    log "$CYAN" "      - Windows/Mac/Linux: tailscale up --exit-node=$TAILSCALE_IP"
-    log "$CYAN" "      - Android/iOS: Settings → Use Exit Node → Select $HOSTNAME"
-    log "$YELLOW" "Exit Node Management:"
-    log "$CYAN" "   - To enable/disable the exit node later, run: exitnode-manager"
-    
-    # If tagged mode, provide ACL instructions
-    if [[ "$EXIT_NODE_MODE" == "tagged" ]]; then
-        banner "Tagged Exit Node ACL Configuration"
-        log "$YELLOW" "You selected a tagged exit node. To configure access permissions:"
-        log "$CYAN" "1. Visit https://login.tailscale.com/admin/acls"
-        log "$CYAN" "2. Edit your policy file to include rules like this:"
-        echo -e "${GREEN}{"
-        echo "  \"tagOwners\": {"
-        echo "    \"tag:$TAG\": [\"your-user@example.com\"]"
-        echo "  },"
-        echo "  \"acls\": ["
-        echo "    // Allow devices with this tag to use this exit node"
-        echo "    {\"action\": \"accept\", \"src\": [\"tag:client-devices\"], \"dst\": [\"tag:$TAG:*\"]}"
-        echo "  ],"
-        echo "  \"exitNodes\": ["
-        echo "    // These users or tags can use exit nodes"
-        echo "    \"tag:client-devices\""
-        echo "  ],"
-        echo "  \"exitNodeIP\": ["
-        echo "    // These users or tags can be exit nodes"
-        echo "    \"tag:$TAG\""
-        echo "  ]"
-        echo -e "}${NC}"
-        log "$YELLOW" "Replace 'your-user@example.com' with your Tailscale account email"
-        log "$YELLOW" "Replace 'tag:client-devices' with the tag assigned to client devices"
-    fi
-fi
-
-# Display any final exit node instructions before reboot
-if [[ "$EXIT_NODE_ENABLE" == "yes" ]]; then
-    log "$BLUE" "TIP: Run internet speed tests at both ends to verify exit node performance."
-    log "$BLUE" "     Exit nodes work best with consistent, fast connections."
-fi
-
 log "$GREEN" "Rebooting in 5..."
 sleep 5
 sync
