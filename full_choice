@@ -388,7 +388,8 @@ TAILSCALE_ARGS="--authkey=$AUTH_KEY --hostname=$HOSTNAME --advertise-tags=$TAG -
 # Add exit node configuration if enabled
 if [[ "$EXIT_NODE_ENABLE" == "yes" ]]; then
     if [[ "$EXIT_NODE_MODE" == "tagged" ]]; then
-        TAILSCALE_ARGS="$TAILSCALE_ARGS --advertise-exit-node:$TAG"
+        # Fix: Use a separate parameter for the tag-specific exit node flag
+        TAILSCALE_ARGS="$TAILSCALE_ARGS --advertise-exit-node"
     else
         TAILSCALE_ARGS="$TAILSCALE_ARGS --advertise-exit-node"
     fi
@@ -503,11 +504,7 @@ if ! pgrep -f "$INSTALL_DIR/bin/tailscaled" > /dev/null; then
     
     # Add exit node configuration if enabled
     if [[ "$EXIT_NODE_ENABLE" == "yes" ]]; then
-        if [[ "$EXIT_NODE_MODE" == "tagged" ]]; then
-            TAILSCALE_ARGS="\$TAILSCALE_ARGS --advertise-exit-node:$TAG"
-        else
-            TAILSCALE_ARGS="\$TAILSCALE_ARGS --advertise-exit-node"
-        fi
+        TAILSCALE_ARGS="\$TAILSCALE_ARGS --advertise-exit-node"
     fi
     
     [ -f "$INSTALL_DIR/tailscaled.state" ] && $INSTALL_DIR/bin/tailscale --socket=$INSTALL_DIR/tailscaled.sock up \$TAILSCALE_ARGS > /tmp/tailscaled.log 2>&1
@@ -531,3 +528,79 @@ echo -e "${CYAN}SSH Authentication Mode: $AUTH_MODE${NC}"
 [[ "$SUBNET_ENABLE" == "yes" ]] && echo -e "${CYAN}Subnet Routing: $SUBNET${NC}"
 if [[ "$EXIT_NODE_ENABLE" == "yes" ]]; then
     echo -e "${CYAN}Exit Node Enabled: Yes (Mode: ${EXIT_NODE_MODE})${NC}"
+fi
+read -rp "Ready to reboot? (yes/no): " REBOOT_CONFIRM
+if [[ "$REBOOT_CONFIRM" != "yes" ]]; then
+    log "$RED" "Reboot canceled—review settings manually."
+    exit 1
+fi
+
+# Completion Message
+banner "Setup Complete!"
+log "$GREEN" "
+# Completion Message
+banner "Setup Complete!"
+log "$GREEN" "✅ Tailscale & SSH configured!"
+if [[ "$AUTH_MODE" == "key" ]]; then
+    log "$YELLOW" "SSH: ssh batocera-tailscale"
+    log "$CYAN" "   - Or: ssh -i ~/.ssh/id_ed25519_batocera root@$TAILSCALE_IP"
+else
+    log "$YELLOW" "SSH: ssh root@$TAILSCALE_IP"
+    log "$CYAN" "   - Password: linux"
+fi
+log "$YELLOW" "Samba access (read/write):"
+log "$CYAN" "   - Local: smb://$LOCAL_IP/share"
+log "$CYAN" "   - Tailscale: smb://$TAILSCALE_IP/share"
+[[ "$SUBNET_ENABLE" == "yes" ]] && log "$YELLOW" "Subnet routing enabled: Approve $SUBNET in Tailscale Admin."
+
+# Exit Node Instructions
+if [[ "$EXIT_NODE_ENABLE" == "yes" ]]; then
+    log "$YELLOW" "Exit Node enabled! To use it:"
+    log "$CYAN" "   1. Approve this device as an exit node in Tailscale admin"
+    log "$CYAN" "   2. On client devices:"
+    log "$CYAN" "      - Windows/Mac/Linux: tailscale up --exit-node=$TAILSCALE_IP"
+    log "$CYAN" "      - Android/iOS: Settings → Use Exit Node → Select $HOSTNAME"
+    log "$YELLOW" "Exit Node Management:"
+    log "$CYAN" "   - To enable/disable the exit node later, run: exitnode-manager"
+    
+    # If tagged mode, provide ACL instructions
+    if [[ "$EXIT_NODE_MODE" == "tagged" ]]; then
+        banner "Tagged Exit Node ACL Configuration"
+        log "$YELLOW" "You selected a tagged exit node. To configure access permissions:"
+        log "$CYAN" "1. Visit https://login.tailscale.com/admin/acls"
+        log "$CYAN" "2. Edit your policy file to include rules like this:"
+        echo -e "${GREEN}{"
+        echo "  \"tagOwners\": {"
+        echo "    \"tag:$TAG\": [\"your-user@example.com\"]"
+        echo "  },"
+        echo "  \"acls\": ["
+        echo "    // Allow devices with this tag to use this exit node"
+        echo "    {\"action\": \"accept\", \"src\": [\"tag:client-devices\"], \"dst\": [\"tag:$TAG:*\"]}"
+        echo "  ],"
+        echo "  \"exitNodes\": ["
+        echo "    // These users or tags can use exit nodes"
+        echo "    \"tag:client-devices\""
+        echo "  ],"
+        echo "  \"exitNodeIP\": ["
+        echo "    // These users or tags can be exit nodes"
+        echo "    \"tag:$TAG\""
+        echo "  ]"
+        echo -e "}${NC}"
+        log "$YELLOW" "Replace 'your-user@example.com' with your Tailscale account email"
+        log "$YELLOW" "Replace 'tag:client-devices' with the tag assigned to client devices"
+    fi
+fi
+
+# Display any final exit node instructions before reboot
+if [[ "$EXIT_NODE_ENABLE" == "yes" ]]; then
+    log "$BLUE" "TIP: Run internet speed tests at both ends to verify exit node performance."
+    log "$BLUE" "     Exit nodes work best with consistent, fast connections."
+fi
+
+log "$GREEN" "Rebooting in 5..."
+sleep 5
+sync
+# Force reboot with SSH cleanup
+pkill -f "dropbear.*2222" || true  # Kill temporary Dropbear
+kill -9 $PPID 2>/dev/null  # Kill parent SSH session
+reboot -f || { log "$RED" "Reboot failed—trying fallback..."; reboot; }
