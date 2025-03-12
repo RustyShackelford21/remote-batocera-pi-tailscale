@@ -1,6 +1,6 @@
 #!/bin/bash
 # Ultimate Batocera Tailscale & SSH Setup (Menu Version)
-# Version: 14.8 - Full Automation with API & Watchdog (Subnet Fix)
+# Version: 14.9 - Fixed Dropbear Check & Device ID Fetch
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -71,7 +71,7 @@ monitor_tailscale() {
 [ "$(id -u)" -ne 0 ] && { log "$RED" "ERROR: Run as root."; exit 1; }
 
 clear
-banner "Batocera Tailscale & SSH Setup (v14.8)"
+banner "Batocera Tailscale & SSH Setup (v14.9)"
 echo -e "${CYAN}Setup Tailscale, SSH, Samba with full automation.${NC}"
 
 # Check internet connection
@@ -280,7 +280,13 @@ if "$INSTALL_DIR/bin/tailscale" --socket="$INSTALL_DIR/tailscaled.sock" status &
         }
     done
     [[ -n "$TAILSCALE_IP" ]] && log "$GREEN" "✅ Tailscale IP: $TAILSCALE_IP" || log "$YELLOW" "Using local IP: $TAILSCALE_IP"
-    DEVICE_ID=$("$INSTALL_DIR/bin/tailscale" --socket="$INSTALL_DIR/tailscaled.sock" status --json | grep -oP '"self":\s*{"id":\s*"\K[^"]+')
+    TRIES=0
+    MAX_TRIES=5
+    while [[ -z "$DEVICE_ID" && $TRIES -lt $MAX_TRIES ]]; do
+        sleep 5
+        DEVICE_ID=$("$INSTALL_DIR/bin/tailscale" --socket="$INSTALL_DIR/tailscaled.sock" status --json | grep -oP '"self":\s*{"id":\s*"\K[^"]+' || echo "")
+        ((TRIES++))
+    done
     [[ -n "$DEVICE_ID" ]] && log "$BLUE" "Device ID: $DEVICE_ID" || log "$YELLOW" "Could not fetch Device ID—API approval skipped."
 else
     log "$RED" "ERROR: Tailscale not running—check $LOG_FILE"
@@ -306,8 +312,8 @@ if [[ -n "$API_KEY" && ( "$SUBNET_ENABLE" == "yes" || "$EXITNODE_ENABLE" == "yes
 fi
 
 # Pre-Reboot SSH Test
-if pgrep -f "dropbear.*-p 22" > /dev/null; then
-    log "$GREEN" "✅ Dropbear running on port 22."
+if pgrep -f "dropbear" > /dev/null; then
+    log "$GREEN" "✅ Dropbear running."
 else
     log "$RED" "ERROR: Dropbear not running—starting manually."
     /usr/sbin/dropbear -s -p 22 || { log "$RED" "Dropbear failed."; exit 1; }
@@ -367,7 +373,7 @@ iptables -P INPUT ACCEPT
 iptables -A INPUT -p tcp --dport 22 -j ACCEPT
 iptables -A INPUT -p tcp --dport 445 -j ACCEPT
 iptables -A INPUT -p udp --dport 137-139 -j ACCEPT
-if ! pgrep -f "dropbear.*-p 22" > /dev/null; then
+if ! pgrep -f "dropbear" > /dev/null; then
     pkill -f dropbear || true
     sleep 1
     /usr/sbin/dropbear -s -p 22 || echo "Dropbear failed" >> /tmp/custom.log
