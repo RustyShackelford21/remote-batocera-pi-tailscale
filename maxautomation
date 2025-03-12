@@ -1,6 +1,6 @@
 #!/bin/bash
 # Ultimate Batocera Tailscale & SSH Setup (Menu Version)
-# Version: 15.3 - Prevents SSH Disconnection & Enhanced Testing
+# Version: 15.4 - No Dropbear Restart During Script
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -86,10 +86,11 @@ verify_ssh_access() {
     banner "SSH TESTING BEFORE FINALIZATION"
     log "$CYAN" "Testing SSH Access—open a new terminal on your PC and follow these steps:"
     if [[ "$AUTH_MODE" == "key" ]]; then
-        log "$CYAN" "1. Test SSH with the key you downloaded:"
+        log "$CYAN" "1. Test SSH with the key you downloaded (password auth still active until reboot):"
         log "$GREEN" "   ssh -i ~/.ssh/id_ed25519_batocera_$HOSTNAME root@$TAILSCALE_IP"
         log "$CYAN" "   Example: ssh -i ~/.ssh/id_ed25519_batocera_$HOSTNAME root@$TAILSCALE_IP"
         log "$CYAN" "   Or use aliases: ssh ${HOSTNAME}-local  or  ssh ${HOSTNAME}-tailscale"
+        log "$CYAN" "   Note: Password (linux) will still work until reboot—key auth takes effect after."
     else
         log "$CYAN" "1. Test SSH with password (default: linux):"
         log "$GREEN" "   ssh root@$TAILSCALE_IP"
@@ -97,11 +98,10 @@ verify_ssh_access() {
     log "$YELLOW" "If SSH fails:"
     log "$YELLOW" "  - Ensure key path is correct (e.g., C:\\Users\\YourUser\\.ssh\\id_ed25519_batocera_$HOSTNAME)"
     log "$YELLOW" "  - Verify ~/.ssh/config is set up"
-    log "$YELLOW" "  - Check Dropbear: manually run /usr/sbin/dropbear -s -p 22 if needed"
+    log "$YELLOW" "  - Check Dropbear manually later: /usr/sbin/dropbear -s -p 22"
     read -rp "Did SSH work successfully? (yes/no): " SSH_TEST
     if [[ "$SSH_TEST" != "yes" ]]; then
         log "$RED" "❌ SSH test failed—fix before proceeding."
-        log "$YELLOW" "Try manual Dropbear restart: /usr/sbin/dropbear -s -p 22"
         log "$YELLOW" "Retest SSH—do not proceed until it works."
         exit 1
     fi
@@ -112,7 +112,7 @@ verify_ssh_access() {
 [ "$(id -u)" -ne 0 ] && { log "$RED" "ERROR: Run as root."; exit 1; }
 
 clear
-banner "Batocera Tailscale & SSH Setup (v15.3)"
+banner "Batocera Tailscale & SSH Setup (v15.4)"
 echo -e "${CYAN}Setup Tailscale, SSH, Samba with full automation.${NC}"
 
 # Detect active SSH sessions
@@ -254,7 +254,7 @@ if [[ "$AUTH_MODE" == "key" ]]; then
     chmod 600 "$OPENSSH_KEY"
 fi
 
-# Dropbear Configuration
+# Dropbear Configuration (No Restart)
 log "$BLUE" "Configuring Dropbear..."
 touch /etc/dropbear/dropbear.conf
 [[ ! -w /etc/dropbear/dropbear.conf ]] && { log "$RED" "ERROR: Cannot write Dropbear config."; exit 1; }
@@ -263,19 +263,6 @@ if [[ "$AUTH_MODE" == "key" ]]; then
     echo "PasswordAuth no" > /etc/dropbear/dropbear.conf
 else
     echo "PasswordAuth yes" > /etc/dropbear/dropbear.conf
-fi
-
-# Only restart Dropbear if no active SSH sessions
-if [[ "$ACTIVE_SSH_SESSIONS" -eq 0 ]]; then
-    log "$BLUE" "Restarting Dropbear..."
-    pkill -x dropbear || true
-    sleep 1
-    /usr/sbin/dropbear -s -p 22 || { log "$RED" "Dropbear restart failed—check manually."; exit 1; }
-    log "$GREEN" "✅ Dropbear restarted."
-else
-    log "$YELLOW" "⚠️ Skipping Dropbear restart to avoid disconnecting you."
-    log "$CYAN" "After testing SSH with the new key, manually restart Dropbear if needed:"
-    log "$CYAN" "  /usr/sbin/dropbear -s -p 22"
 fi
 
 # Tailscale Installation
@@ -413,95 +400,4 @@ EOF
     log "$CYAN" "  6. Delete temp file: del ssh_config"
     log "$CYAN" "For Linux/macOS:"
     log "$CYAN" "  mv id_ed25519_batocera ~/.ssh/id_ed25519_batocera_$HOSTNAME"
-    log "$CYAN" "  chmod 600 ~/.ssh/id_ed25519_batocera_$HOSTNAME"
-    log "$CYAN" "  cat ssh_config >> ~/.ssh/config"
-    python3 -m http.server 8080 --directory "$KEYS_DIR" & SERVER_PID=$!
-    sleep 2
-    log "$YELLOW" "Download key: curl -O http://$LOCAL_IP:8080/id_ed25519_batocera"
-    log "$YELLOW" "Download SSH config: curl -O http://$LOCAL_IP:8080/ssh_config"
-    read -rp "Press Enter when you've downloaded both files and tested SSH from your PC..."
-    kill $SERVER_PID 2>/dev/null
-    log "$GREEN" "✅ Key server stopped."
-    verify_ssh_access
-fi
-
-# Save Config
-log "$BLUE" "Saving configuration..."
-cat > "$CONFIG_FILE" <<EOF
-AUTH_KEY="$AUTH_KEY"
-HOSTNAME="$HOSTNAME"
-TAG="$TAG"
-SUBNET_ENABLE="$SUBNET_ENABLE"
-SUBNET="$SUBNET"
-EXITNODE_ENABLE="$EXITNODE_ENABLE"
-AUTH_MODE="$AUTH_MODE"
-API_KEY="$API_KEY"
-EOF
-
-# Persistence
-log "$BLUE" "Setting persistence..."
-progress_indicator 3 "Saving state"
-cat > /userdata/system/custom.sh <<EOF
-#!/bin/sh
-mkdir -p /dev/net
-[ ! -c /dev/net/tun ] && mknod /dev/net/tun c 10 200 && chmod 600 /dev/net/tun
-ip link set wlan0 up
-iptables -F INPUT
-iptables -P INPUT ACCEPT
-iptables -A INPUT -p tcp --dport 22 -j ACCEPT
-iptables -A INPUT -p tcp --dport 445 -j ACCEPT
-iptables -A INPUT -p udp --dport 137-139 -j ACCEPT
-if ! pgrep -f "dropbear" > /dev/null; then
-    pkill -f dropbear || true
-    sleep 1
-    /usr/sbin/dropbear -s -p 22 || echo "Dropbear failed" >> /tmp/custom.log
-fi
-mkdir -p /var/run/tailscale
-ln -sf $INSTALL_DIR/tailscaled.sock /var/run/tailscale/tailscaled.sock
-if ! pgrep -x "tailscaled" > /dev/null; then
-    $INSTALL_DIR/bin/tailscaled --state=$INSTALL_DIR/tailscaled.state --socket=$INSTALL_DIR/tailscaled.sock --tun=userspace-networking --verbose=1 > /tmp/tailscaled.log 2>&1 &
-    sleep 10
-    TAILSCALE_ARGS="--hostname=$HOSTNAME --advertise-tags=$TAG --accept-routes"
-    [[ "$SUBNET_ENABLE" == "yes" ]] && TAILSCALE_ARGS="\$TAILSCALE_ARGS --advertise-routes=$SUBNET"
-    [[ "$EXITNODE_ENABLE" == "yes" ]] && TAILSCALE_ARGS="\$TAILSCALE_ARGS --advertise-exit-node --accept-routes"
-    [ -f "$INSTALL_DIR/tailscaled.state" ] && $INSTALL_DIR/bin/tailscale --socket=$INSTALL_DIR/tailscaled.sock up \$TAILSCALE_ARGS > /tmp/tailscaled.log 2>&1
-fi
-sleep 15
-if ! pgrep -f "smbd" > /dev/null; then
-    smbd -D -s /etc/samba/smb.conf || echo "Samba failed" >> /tmp/custom.log
-fi
-EOF
-chmod +x /userdata/system/custom.sh
-[ -f "/userdata/system/custom.sh" ] || { log "$RED" "ERROR: custom.sh failed."; exit 1; }
-
-log "$BLUE" "Saving overlay..."
-batocera-save-overlay && sync && log "$GREEN" "✅ Overlay saved." || { log "$RED" "Overlay failed."; exit 1; }
-
-# Setup Watchdog
-setup_watchdog
-
-# Final Confirmation
-banner "Setup Complete!"
-log "$GREEN" "✅ Tailscale & SSH configured!"
-"$INSTALL_DIR/bin/tailscale" --socket="$INSTALL_DIR/tailscaled.sock" version > /tmp/tailscale_version.log 2>&1
-log "$CYAN" "Tailscale Version: $(cat /tmp/tailscale_version.log | head -n 1)"
-log "$CYAN" "Tailscale IP: $TAILSCALE_IP"
-log "$CYAN" "SSH Authentication Mode: $AUTH_MODE"
-[[ "$SUBNET_ENABLE" == "yes" ]] && log "$CYAN" "Subnet Routing: $SUBNET" || log "$CYAN" "Subnet Routing: None"
-[[ "$EXITNODE_ENABLE" == "yes" ]] && log "$CYAN" "Exit Node: Enabled" || log "$CYAN" "Exit Node: Disabled"
-log "$CYAN" "Watchdog: Running every 5 minutes (or loop if crond unavailable)"
-if [[ "$AUTH_MODE" == "key" ]]; then
-    log "$GREEN" "SSH: ssh ${HOSTNAME}-local  or  ssh ${HOSTNAME}-tailscale"
-else
-    log "$GREEN" "SSH: ssh root@$TAILSCALE_IP (password: linux)"
-fi
-log "$YELLOW" "All services running—reboot optional."
-read -rp "Reboot now? (yes/no): " REBOOT_CONFIRM
-if [[ "$REBOOT_CONFIRM" == "yes" ]]; then
-    log "$GREEN" "Rebooting in 5..."
-    sleep 5
-    sync
-    reboot -f || { log "$RED" "Reboot failed—try manually."; }
-else
-    log "$GREEN" "Setup complete—no reboot. Log: $LOG_FILE"
-fi
+    log "$CYAN" "  chmod 600 ~/.ssh/id_ed25519_batocera_$HOSTNAME
