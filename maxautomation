@@ -1,6 +1,6 @@
 #!/bin/bash
 # Ultimate Batocera Tailscale & SSH Setup (Menu Version)
-# Version: 14.6 - Improved SSH Key Handling and Config Setup
+# Version: 14.9 - Added Exit Node Support, Kept Exact Key Locations
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -47,7 +47,7 @@ progress_indicator() {
 [ "$(id -u)" -ne 0 ] && { log "$RED" "ERROR: Run as root."; exit 1; }
 
 clear
-banner "Batocera Tailscale & SSH Setup (v14.6)"
+banner "Batocera Tailscale & SSH Setup (v14.9)"
 echo -e "${CYAN}Setup Tailscale, SSH (password or key), Samba, subnet routing, and optional exit node.${NC}"
 
 # Check internet connection
@@ -135,7 +135,7 @@ else
     SUBNET_ENABLE="no"
 fi
 
-# Exit Node Option
+# Exit Node Option (New)
 log "$YELLOW" "Step 4: Exit Node"
 echo "Advertise this device as an exit node (routes all Tailnet traffic through it)?"
 echo "1) Yes"
@@ -249,89 +249,56 @@ done
 
 # SSH Key Download and Config (if key mode)
 if [[ "$AUTH_MODE" == "key" ]]; then
-    banner "SSH Key Download and Setup"
-    echo -e "${CYAN}We’ll set up your SSH key and config file for easy access.${NC}"
-    log "$YELLOW" "Step 1: Start a temporary server to download files..."
-    log "$BLUE" "Starting a simple HTTP server on port 8080 (uses local IP: $LOCAL_IP)..."
-    python3 -m http.server 8080 --directory "$KEYS_DIR" & SERVER_PID=$!
-    sleep 2
-
-    log "$YELLOW" "Step 2: Download the SSH key to your local machine..."
-    log "$CYAN" "Open a NEW terminal on your computer (not this one):"
-    log "$CYAN" "  - Windows: Press Win + T, type 'powershell', hit Enter."
-    log "$CYAN" "  - Linux/macOS: Open your terminal app."
-    log "$CYAN" "Run this command to download the key (it will save to your current directory):"
-    echo "curl -O http://$LOCAL_IP:8080/id_ed25519_batocera"
-    log "$CYAN" "The key will be saved as 'id_ed25519_batocera' in your terminal’s current folder."
-
-    log "$YELLOW" "Step 3: Move the key to the right place..."
-    log "$CYAN" "Move the key to your SSH folder (create it if it doesn’t exist):"
-    log "$CYAN" "  - Windows: In PowerShell, run:"
-    echo "mkdir -Force ~\\.ssh; Move-Item -Path .\\id_ed25519_batocera -Destination ~\\.ssh\\id_ed25519_batocera_${HOSTNAME}"
-    log "$CYAN" "  - Linux/macOS: In your terminal, run:"
-    echo "mkdir -p ~/.ssh; mv ./id_ed25519_batocera ~/.ssh/id_ed25519_batocera_${HOSTNAME}"
-    log "$CYAN" "This saves the key as 'id_ed25519_batocera_${HOSTNAME}' in your SSH folder."
-
-    log "$YELLOW" "Step 4: Download the SSH config file..."
-    log "$CYAN" "Run this command in your new terminal to download the config:"
-    cat > "$KEYS_DIR/ssh_config" <<EOF
-Host ${HOSTNAME}-local
-    HostName $LOCAL_IP
-    User root
-    IdentityFile ~/.ssh/id_ed25519_batocera_${HOSTNAME}
-    StrictHostKeyChecking no
-
-Host ${HOSTNAME}-tailscale
+    banner "SSH Key Download and Testing"
+    echo -e "${CYAN}Download your SSH key and config—follow these steps:${NC}"
+    log "$YELLOW" "1. Open a NEW terminal (PowerShell: Win + T, 'powershell'; Linux/macOS: any terminal):"
+    log "$BLUE" "Starting Dropbear on 2222 (password mode)..."
+    pkill -f "dropbear.*2222" || true
+    /usr/sbin/dropbear -p 2222 || { log "$RED" "Dropbear failed on 2222."; exit 1; }
+    sleep 5
+    log "$YELLOW" "2. Download the SSH key—copy-paste this:"
+    echo "scp -P 2222 root@$LOCAL_IP:/userdata/system/tailscale/keys/id_ed25519_batocera \"C:\\\\Users\\\\\$(powershell.exe -NoProfile -Command 'Write-Output \$env:USERNAME')\\\\.ssh\\\\id_ed25519_batocera\""
+    log "$CYAN" "   - Windows: Auto-detects username."
+    log "$CYAN" "   - Password: 'linux'."
+    log "$CYAN" "   - Linux/macOS: scp -P 2222 root@$LOCAL_IP:/userdata/system/tailscale/keys/id_ed25519_batocera ~/.ssh/id_ed25519_batocera"
+    log "$CYAN" "   - iOS: Termius: scp -P 2222 root@$LOCAL_IP:/userdata/system/tailscale/keys/id_ed25519_batocera <destination>"
+    log "$YELLOW" "3. Fix key permissions (Windows only):"
+    echo "icacls \"C:\\\\Users\\\\\$(powershell.exe -NoProfile -Command 'Write-Output \$env:USERNAME')\\\\.ssh\\\\id_ed25519_batocera\" /inheritance:r /grant:r \"\$(powershell.exe -NoProfile -Command 'Write-Output \$env:USERNAME'):F\""
+    log "$YELLOW" "4. Download SSH config—copy-paste this:"
+    cat > /tmp/ssh_config <<EOF
+Host batocera-tailscale $TAILSCALE_IP
     HostName $TAILSCALE_IP
     User root
-    IdentityFile ~/.ssh/id_ed25519_batocera_${HOSTNAME}
-    StrictHostKeyChecking no
-
-Host $HOSTNAME
-    HostName $HOSTNAME
-    User root
-    IdentityFile ~/.ssh/id_ed25519_batocera_${HOSTNAME}
+    IdentityFile ~/.ssh/id_ed25519_batocera
     StrictHostKeyChecking no
 EOF
-    chmod 644 "$KEYS_DIR/ssh_config"
-    echo "curl -O http://$LOCAL_IP:8080/ssh_config"
-    log "$CYAN" "This saves 'ssh_config' in your current folder."
-
-    log "$YELLOW" "Step 5: Set up the SSH config file..."
-    log "$CYAN" "Move the config to your SSH folder and append it if needed:"
-    log "$CYAN" "  - Windows (PowerShell):"
-    echo "if (Test-Path ~\\.ssh\\config) { Add-Content ~\\.ssh\\config (Get-Content .\\ssh_config) } else { Move-Item .\\ssh_config ~\\.ssh\\config }"
-    log "$CYAN" "  - Linux/macOS:"
-    echo "cat ./ssh_config >> ~/.ssh/config || mv ./ssh_config ~/.ssh/config"
-    log "$CYAN" "This adds the new settings to your existing config file (or creates it if none exists)."
-
-    log "$YELLOW" "Step 6: Test your SSH connection..."
-    log "$CYAN" "Try these commands in your new terminal to connect:"
-    log "$GREEN" "  - Local IP: ssh ${HOSTNAME}-local"
-    log "$GREEN" "  - Tailscale IP: ssh ${HOSTNAME}-tailscale"
-    log "$GREEN" "  - Hostname: ssh $HOSTNAME"
-    log "$CYAN" "Note: For Tailscale IP, ensure Tailscale is running on your computer."
-    read -rp "Did at least one SSH command work? (yes/no): " SSH_TEST
-    if [[ "$SSH_TEST" =~ ^[Yy]es$ ]]; then
-        log "$GREEN" "✅ SSH setup confirmed!"
+    chmod 600 /tmp/ssh_config
+    echo "scp -P 2222 root@$LOCAL_IP:/tmp/ssh_config \"C:\\\\Users\\\\\$(powershell.exe -NoProfile -Command 'Write-Output \$env:USERNAME')\\\\.ssh\\\\config\""
+    log "$CYAN" "   - Linux/macOS: scp -P 2222 root@$LOCAL_IP:/tmp/ssh_config ~/.ssh/config"
+    log "$CYAN" "   - iOS: In Termius, set key, IP ($TAILSCALE_IP), user (root)—no config needed."
+    log "$CYAN" "   - After downloading, use 'ssh batocera-tailscale'."
+    log "$YELLOW" "5. Test SSH—copy-paste this:"
+    echo "ssh -i \"C:\\\\Users\\\\\$(powershell.exe -NoProfile -Command 'Write-Output \$env:USERNAME')\\\\.ssh\\\\id_ed25519_batocera\" root@$LOCAL_IP -p 2222"
+    log "$CYAN" "   - Linux/macOS: ssh -i ~/.ssh/id_ed25519_batocera root@$LOCAL_IP -p 2222"
+    log "$CYAN" "   - iOS: Termius, IP ($LOCAL_IP), port 2222."
+    read -rp "Did SSH work on 2222? (yes/no): " KEY_WORKS
+    if [[ "$KEY_WORKS" =~ ^[Yy]es$ ]]; then
+        log "$GREEN" "✅ Key confirmed!"
     else
-        log "$RED" "❌ SSH failed—check your key and config setup, then try again."
-        kill $SERVER_PID 2>/dev/null
+        log "$RED" "❌ Key failed—troubleshoot."
+        pkill -f "dropbear.*2222" || true
         exit 1
     fi
-
-    log "$BLUE" "Stopping temporary server..."
-    kill $SERVER_PID 2>/dev/null
 fi
 
 # Final SSH Test (Key Mode Only)
 if [[ "$AUTH_MODE" == "key" ]]; then
-    log "$YELLOW" "Final test before reboot—confirm SSH works with aliases:"
-    log "$GREEN" "  ssh ${HOSTNAME}-local  # Local IP"
-    log "$GREEN" "  ssh ${HOSTNAME}-tailscale  # Tailscale IP"
-    log "$GREEN" "  ssh $HOSTNAME  # Hostname"
-    log "$CYAN" "Run one of these in your new terminal."
-    read -rp "Did SSH work with an alias? (yes/no): " SSH_WORKS
+    log "$YELLOW" "Final test—confirm SSH works before reboot:"
+    echo "ssh batocera-tailscale  # Or: ssh -i \"C:\\\\Users\\\\\$(powershell.exe -NoProfile -Command 'Write-Output \$env:USERNAME')\\\\.ssh\\\\id_ed25519_batocera\" root@$LOCAL_IP"
+    log "$CYAN" "   - Linux/macOS: ssh -i ~/.ssh/id_ed25519_batocera root@$LOCAL_IP"
+    log "$CYAN" "   - iOS: Termius, IP ($LOCAL_IP), port 22."
+    log "$CYAN" "   - NOTE: Ensure Tailscale is ENABLED on your PC for this test (unlike local IP tests where it’s off)."
+    read -rp "Did SSH work? (yes/no): " SSH_WORKS
     [[ "$SSH_WORKS" =~ ^[Nn]o$ ]] && { log "$RED" "❌ SSH failed—reboot canceled."; exit 1; }
 fi
 
@@ -354,7 +321,7 @@ if ! pgrep -f "dropbear.*-p 22" > /dev/null; then
     /usr/sbin/dropbear -s -p 22 || echo "Dropbear failed" >> /tmp/custom.log
 fi
 mkdir -p /var/run/tailscale
-ln -sf $INSTALL_DIR/tailscaled.sock /var/run/tailscale/tailscaled.sock
+ln -sf $INSTALL_DIR/t’indscaled.sock /var/run/tailscale/tailscaled.sock
 if ! pgrep -f "$INSTALL_DIR/bin/tailscaled" > /dev/null; then
     $INSTALL_DIR/bin/tailscaled --state=$INSTALL_DIR/tailscaled.state --socket=$INSTALL_DIR/tailscaled.sock --tun=userspace-networking --verbose=1 > /tmp/tailscaled.log 2>&1 &
     sleep 10
@@ -391,10 +358,8 @@ fi
 banner "Setup Complete!"
 log "$GREEN" "✅ Tailscale & SSH configured!"
 if [[ "$AUTH_MODE" == "key" ]]; then
-    log "$YELLOW" "SSH Commands:"
-    log "$GREEN" "  ssh ${HOSTNAME}-local  # Local IP"
-    log "$GREEN" "  ssh ${HOSTNAME}-tailscale  # Tailscale IP"
-    log "$GREEN" "  ssh $HOSTNAME  # Hostname"
+    log "$YELLOW" "SSH: ssh batocera-tailscale"
+    log "$CYAN" "   - Or: ssh -i ~/.ssh/id_ed25519_batocera root@$TAILSCALE_IP"
 else
     log "$YELLOW" "SSH: ssh root@$TAILSCALE_IP"
     log "$CYAN" "   - Password: linux"
@@ -408,6 +373,6 @@ log "$GREEN" "Rebooting in 5..."
 sleep 5
 sync
 # Force reboot with SSH cleanup
-pkill -f "dropbear.*2222" || true  # Kill temporary Dropbear (if any)
+pkill -f "dropbear.*2222" || true  # Kill temporary Dropbear
 kill -9 $PPID 2>/dev/null  # Kill parent SSH session
 reboot -f || { log "$RED" "Reboot failed—trying fallback..."; reboot; }
