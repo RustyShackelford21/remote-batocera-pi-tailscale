@@ -193,8 +193,22 @@ touch /etc/dropbear/dropbear.conf
 sed -i '/^PasswordAuth/d' /etc/dropbear/dropbear.conf 2>/dev/null || true
 if [[ "$AUTH_MODE" == "key" ]]; then
     echo "PasswordAuth no" > /etc/dropbear/dropbear.conf
+    log "$GREEN" "✅ Password authentication disabled, keys required"
 else
     echo "PasswordAuth yes" > /etc/dropbear/dropbear.conf
+    log "$GREEN" "✅ Password authentication enabled"
+fi
+
+# Restart Dropbear to apply changes (but not on port 22 to avoid disconnecting current session)
+if pgrep -f "dropbear.*-p 22" > /dev/null; then
+    log "$YELLOW" "⚠️ Skipping main Dropbear restart to avoid disconnecting you"
+    log "$YELLOW" "⚠️ Changes will apply after reboot"
+else
+    log "$BLUE" "Restarting Dropbear..."
+    pkill -f dropbear || true
+    sleep 1
+    /usr/sbin/dropbear -s -p 22 || { log "$RED" "Dropbear restart failed."; exit 1; }
+    log "$GREEN" "✅ Dropbear restarted with new settings"
 fi
 
 # Samba Configuration
@@ -282,19 +296,20 @@ if [[ "$AUTH_MODE" == "key" ]]; then
     log "$YELLOW" "3. Fix key permissions (Windows only):"
     echo "icacls \"C:\\\\Users\\\\\$(powershell.exe -NoProfile -Command 'Write-Output \$env:USERNAME')\\\\.ssh\\\\id_ed25519_${HOSTNAME}\" /inheritance:r /grant:r \"\$(powershell.exe -NoProfile -Command 'Write-Output \$env:USERNAME'):F\""
     log "$YELLOW" "4. Download SSH config—copy-paste this:"
-    cat > /tmp/ssh_config <<EOF
+    cat > /tmp/ssh_config_${HOSTNAME} <<EOF
 Host ${HOSTNAME}-tailscale $TAILSCALE_IP
     HostName $TAILSCALE_IP
     User root
     IdentityFile ~/.ssh/id_ed25519_${HOSTNAME}
     StrictHostKeyChecking no
 EOF
-    chmod 600 /tmp/ssh_config
-    echo "scp -P 2222 root@$LOCAL_IP:/tmp/ssh_config \"C:\\\\Users\\\\\$(powershell.exe -NoProfile -Command 'Write-Output \$env:USERNAME')\\\\.ssh\\\\config\""
-    log "$CYAN" "   - Linux/macOS: scp -P 2222 root@$LOCAL_IP:/tmp/ssh_config ~/.ssh/config_${HOSTNAME}"
+    chmod 600 /tmp/ssh_config_${HOSTNAME}
+    echo "scp -P 2222 root@$LOCAL_IP:/tmp/ssh_config_${HOSTNAME} \"C:\\\\Users\\\\\$(powershell.exe -NoProfile -Command 'Write-Output \$env:USERNAME')\\\\.ssh\\\\config_${HOSTNAME}\""
+    log "$CYAN" "   - Linux/macOS: scp -P 2222 root@$LOCAL_IP:/tmp/ssh_config_${HOSTNAME} ~/.ssh/config_${HOSTNAME}"
     log "$CYAN" "   - iOS: In Termius, set key, IP ($TAILSCALE_IP), user (root)—no config needed."
-    log "$YELLOW" "5. Append to existing SSH config (Linux/macOS):"
-    log "$CYAN" "   - cat ~/.ssh/config_${HOSTNAME} >> ~/.ssh/config"
+    log "$YELLOW" "5. Append to existing SSH config (Windows):"
+    log "$CYAN" "   - type \"C:\\\\Users\\\\\$(powershell.exe -NoProfile -Command 'Write-Output \$env:USERNAME')\\\\.ssh\\\\config_${HOSTNAME}\" >> \"C:\\\\Users\\\\\$(powershell.exe -NoProfile -Command 'Write-Output \$env:USERNAME')\\\\.ssh\\\\config\""
+    log "$CYAN" "   - Linux/macOS: cat ~/.ssh/config_${HOSTNAME} >> ~/.ssh/config"
     log "$YELLOW" "6. Test SSH—copy-paste this:"
     echo "ssh -i \"C:\\\\Users\\\\\$(powershell.exe -NoProfile -Command 'Write-Output \$env:USERNAME')\\\\.ssh\\\\id_ed25519_${HOSTNAME}\" root@$LOCAL_IP -p 2222"
     log "$CYAN" "   - Linux/macOS: ssh -i ~/.ssh/id_ed25519_${HOSTNAME} root@$LOCAL_IP -p 2222"
