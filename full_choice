@@ -1,6 +1,6 @@
 #!/bin/bash
 # Ultimate Batocera Tailscale & SSH Setup (Menu Version)
-# Version: 14.5 - Auto-Detect Latest Tailscale, Connection Check, Improved Error Handling, Hostname-based SSH keys
+# Version: 14.6 - Auto-Detect Latest Tailscale, Connection Check, Hostname-based SSH keys, v12.23-style auth switch
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -46,7 +46,7 @@ progress_indicator() {
 [ "$(id -u)" -ne 0 ] && { log "$RED" "ERROR: Run as root."; exit 1; }
 
 clear
-banner "Batocera Tailscale & SSH Setup (v14.5)"
+banner "Batocera Tailscale & SSH Setup (v14.6)"
 echo -e "${CYAN}Setup Tailscale, SSH (password or key), Samba file sharing, subnet routing, and exit node.${NC}"
 
 # Check internet connection
@@ -155,10 +155,8 @@ log "$BLUE" "Detecting local IP..."
 LOCAL_IP=$(ip -4 addr show | grep -oE "inet [0-9]+\.[0-9]+\.[0-9]+\.[0-9]+" | awk '{print $2}' | grep -v "127.0.0.1" | head -n 1)
 if [[ -z "$LOCAL_IP" || ! "$LOCAL_IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
     log "$YELLOW" "⚠️ Could not detect valid local IP, attempting alternate methods..."
-    # Try another method to get IP
     LOCAL_IP=$(hostname -I | awk '{print $1}')
     if [[ -z "$LOCAL_IP" || ! "$LOCAL_IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-        # Last resort - ask user
         log "$RED" "ERROR: Could not detect valid local IP."
         read -rp "Please enter your device's local IP address: " LOCAL_IP
         if [[ -z "$LOCAL_IP" || ! "$LOCAL_IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
@@ -192,23 +190,11 @@ touch /etc/dropbear/dropbear.conf
 [[ ! -w /etc/dropbear/dropbear.conf ]] && { log "$RED" "ERROR: Cannot write Dropbear config."; exit 1; }
 sed -i '/^PasswordAuth/d' /etc/dropbear/dropbear.conf 2>/dev/null || true
 if [[ "$AUTH_MODE" == "key" ]]; then
-    echo "PasswordAuth no" > /etc/dropbear/dropbear.conf
-    log "$GREEN" "✅ Password authentication disabled, keys required"
+    echo "PasswordAuth yes" > /etc/dropbear/dropbear.conf
+    log "$YELLOW" "⚠️ Password auth enabled until key is confirmed"
 else
     echo "PasswordAuth yes" > /etc/dropbear/dropbear.conf
     log "$GREEN" "✅ Password authentication enabled"
-fi
-
-# Restart Dropbear to apply changes (but not on port 22 to avoid disconnecting current session)
-if pgrep -f "dropbear.*-p 22" > /dev/null; then
-    log "$YELLOW" "⚠️ Skipping main Dropbear restart to avoid disconnecting you"
-    log "$YELLOW" "⚠️ Changes will apply after reboot"
-else
-    log "$BLUE" "Restarting Dropbear..."
-    pkill -f dropbear || true
-    sleep 1
-    /usr/sbin/dropbear -s -p 22 || { log "$RED" "Dropbear restart failed."; exit 1; }
-    log "$GREEN" "✅ Dropbear restarted with new settings"
 fi
 
 # Samba Configuration
@@ -317,21 +303,34 @@ EOF
     read -rp "Did SSH work on 2222? (yes/no): " KEY_WORKS
     if [[ "$KEY_WORKS" =~ ^[Yy]es$ ]]; then
         log "$GREEN" "✅ Key confirmed!"
+        echo "PasswordAuth no" > /etc/dropbear/dropbear.conf
+        log "$BLUE" "Locking to key auth on 22..."
+        progress_indicator 2 "Locking SSH"
+        if ! pgrep -f "dropbear.*-p 22" > /dev/null; then
+            pkill -f "dropbear" || true
+            sleep 1
+            /usr/sbin/dropbear -s -p 22 || { log "$RED" "Dropbear failed!"; exit 1; }
+            log "$GREEN" "✅ Dropbear restarted with key-only settings"
+        else
+            log "$YELLOW" "⚠️ Skipping Dropbear restart to avoid disconnecting you"
+            log "$CYAN" "   - Key-only mode will apply after reboot"
+        fi
     else
         log "$RED" "❌ Key failed—troubleshoot."
         pkill -f "dropbear.*2222" || true
         exit 1
     fi
+    pkill -f "dropbear.*2222" || true  # Clean up 2222
 fi
 
 # Final SSH Test (Key Mode Only)
 if [[ "$AUTH_MODE" == "key" ]]; then
-    log "$YELLOW" "Final test—confirm SSH works before reboot:"
+    log "$YELLOW" "Final test—confirm key-only SSH works before reboot:"
     echo "ssh ${HOSTNAME}-tailscale  # Or: ssh -i \"C:\\\\Users\\\\\$(powershell.exe -NoProfile -Command 'Write-Output \$env:USERNAME')\\\\.ssh\\\\id_ed25519_${HOSTNAME}\" root@$LOCAL_IP"
     log "$CYAN" "   - Linux/macOS: ssh -i ~/.ssh/id_ed25519_${HOSTNAME} root@$LOCAL_IP"
     log "$CYAN" "   - iOS: Termius, IP ($LOCAL_IP), port 22."
-    log "$CYAN" "   - NOTE: Ensure Tailscale is ENABLED on your PC for this test (unlike local IP tests where it's off)."
-    read -rp "Did SSH work? (yes/no): " SSH_WORKS
+    log "$CYAN" "   - NOTE: Ensure Tailscale is ENABLED for ${HOSTNAME}-tailscale. Pre-reboot, passwords might work if Dropbear wasn’t restarted."
+    read -rp "Did key-based SSH work (and password fail)? (yes/no): " SSH_WORKS
     [[ "$SSH_WORKS" =~ ^[Nn]o$ ]] && { log "$RED" "❌ SSH failed—reboot canceled."; exit 1; }
 fi
 
