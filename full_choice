@@ -151,8 +151,23 @@ else
 fi
 
 # Get Local IP
-LOCAL_IP=$(ip -4 addr show | grep -oE "inet [0-9]+\.[0-9]+\.[0-9]+" | awk '{print $2}' | grep -v "127.0.0.1" | head -n 1)
-[[ -z "$LOCAL_IP" ]] && { log "$RED" "ERROR: Local IP not found."; LOCAL_IP="<LOCAL_IP>"; } || log "$BLUE" "Local IP: $LOCAL_IP"
+log "$BLUE" "Detecting local IP..."
+LOCAL_IP=$(ip -4 addr show | grep -oE "inet [0-9]+\.[0-9]+\.[0-9]+\.[0-9]+" | awk '{print $2}' | grep -v "127.0.0.1" | head -n 1)
+if [[ -z "$LOCAL_IP" || ! "$LOCAL_IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    log "$YELLOW" "⚠️ Could not detect valid local IP, attempting alternate methods..."
+    # Try another method to get IP
+    LOCAL_IP=$(hostname -I | awk '{print $1}')
+    if [[ -z "$LOCAL_IP" || ! "$LOCAL_IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        # Last resort - ask user
+        log "$RED" "ERROR: Could not detect valid local IP."
+        read -rp "Please enter your device's local IP address: " LOCAL_IP
+        if [[ -z "$LOCAL_IP" || ! "$LOCAL_IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            log "$RED" "ERROR: Invalid IP format. Exiting."
+            exit 1
+        fi
+    fi
+fi
+log "$GREEN" "✅ Local IP: $LOCAL_IP"
 
 # SSH Key Setup (if key mode)
 if [[ "$AUTH_MODE" == "key" ]]; then
