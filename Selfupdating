@@ -2,7 +2,7 @@
 # Batocera Tailscale & SSH Setup (v15.0)
 # - Works on Batocera (Pi 5) with persistent /userdata
 # - Installs or repairs Tailscale + optional SSH key flow + Samba
-# - Adds a one-shot self-updater: ./script.sh --update (or choose from menu)
+# - Adds a one-shot self-updater: ./Selfupdating.sh --update (or choose from menu)
 # - Keeps your existing state; no auth key needed for updates
 
 set -euo pipefail
@@ -50,7 +50,7 @@ net_ok(){ ping -c 1 8.8.8.8 >/dev/null 2>&1; }
 
 latest_tailscale(){
   curl -fsSL "https://pkgs.tailscale.com/stable/" \
-  | grep -oP 'tailscale_\\K[0-9]+\\.[0-9]+\\.[0-9]+(?=_arm64\\.tgz)' \
+  | grep -oP 'tailscale_\K[0-9]+\.[0-9]+\.[0-9]+(?=_arm64\.tgz)' \
   | sort -V | tail -n1
 }
 
@@ -176,7 +176,7 @@ install_or_repair(){
   mkdir -p "$SSH_DIR" "$KEYS_DIR" /etc/dropbear
   chmod 700 "$SSH_DIR" "$KEYS_DIR" /etc/dropbear
 
-  # Default to key-only on 22; we will use a temporary 2222 for key transfer
+  # Default to key-only on 22; we will use a temporary 2222 for key transfer if needed
   echo "PasswordAuth no" > /etc/dropbear/dropbear.conf
   if [ "$AUTH_MODE" = password ]; then
     sed -i 's/^PasswordAuth .*/PasswordAuth yes/' /etc/dropbear/dropbear.conf
@@ -237,7 +237,7 @@ EOF_SMBCFG
   fi
 
   section_divider "PERSISTENCE (custom.sh)"
-  cat > "$CUSTOM_SH" <<EOF_BOOT
+  cat > "$CUSTOM_SH" <<EOF
 #!/bin/sh
 mkdir -p /dev/net
 [ ! -c /dev/net/tun ] && mknod /dev/net/tun c 10 200 && chmod 600 /dev/net/tun
@@ -305,7 +305,9 @@ case "${1:-}" in
 esac
 
 # Tiny menu (Enter = install/repair)
-echo -e "${WHITE}Choose an action:${NC}\n  1) Install/Repair (interactive)\n  2) Update Tailscale now"
+echo -e "${WHITE}Choose an action:${NC}
+  1) Install/Repair (interactive)
+  2) Update Tailscale now"
 read -rp "Choice [1/2, default 1]: " CH
 if [ "${CH:-1}" = "2" ]; then update_tailscale; exit $?; fi
 
