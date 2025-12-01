@@ -1,35 +1,27 @@
 #!/bin/bash
-# Batocera Tailscale & SSH Setup - Hybrid Edition (v17.2)
-# - Works on Batocera (Pi 5) with persistent /userdata
-# - Installs or repairs Tailscale + optional SSH key flow + Samba
-# - Tag is now OPTIONAL (default tag, custom tag, or NO TAG)
-# - Adds self-update & backup/restore & status menu
+# Batocera Tailscale & SSH Setup - Core Installer
+# Based on v14.6 with:
+# - Optional tags (default/custom/none)
+# - Guided key setup & test
+# - Subnet routing & exit node support
 
-set -euo pipefail
-
-########################################
-# Styling & Helpers
-########################################
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 CYAN='\033[0;36m'
 MAGENTA='\033[0;35m'
-WHITE='\033[1;37m'
-GRAY='\033[0;90m'
-BOLD='\033[1m'
-DIM='\033[2m'
 NC='\033[0m'
 
-CHECKMARK="✓"
-CROSSMARK="✗"
-ARROW="→"
-BULLET="•"
-WARNING="⚠"
-INFO="ℹ"
+log() {
+    echo -e "${1}[$(date '+%Y-%m-%d %H:%M:%S')] ${2}${NC} ${MAGENTA}⚡${NC}"
+}
 
-log() { echo -e "${1}[$(date '+%Y-%m-%d %H:%M:%S')] ${2}${NC} ${MAGENTA}⚡${NC}"; }
+INSTALL_DIR="/userdata/system/tailscale"
+SSH_DIR="/userdata/system/.ssh"
+KEYS_DIR="$INSTALL_DIR/keys"
+DROPBEAR_KEY="$SSH_DIR/id_dropbear"
+LOCAL_SSH_PORT="22"
 
 banner() {
     local text="$1"
@@ -55,640 +47,226 @@ progress_indicator() {
     echo -e "\b${GREEN}✓${NC}"
 }
 
-info_box()  { echo -e "${BLUE}${INFO}${NC}  ${WHITE}$1${NC}"; }
-warn_box()  { echo -e "${YELLOW}${WARNING}${NC}  ${YELLOW}$1${NC}"; }
-error_box() { echo -e "${RED}${CROSSMARK}${NC}  ${RED}$1${NC}"; }
-success_box(){ echo -e "${GREEN}${CHECKMARK}${NC}  ${GREEN}$1${NC}"; }
-step_box()  { echo -e "${CYAN}${ARROW}${NC}  ${CYAN}$1${NC}"; }
+# Ensure script is run as root
+if [ "$(id -u)" -ne 0 ]; then
+    log "$RED" "ERROR: Run this script as root."
+    exit 1
+fi
 
-press_any_key() {
-    echo -e "\n${DIM}Press any key to continue...${NC}"
-    read -n 1 -s -r || true
-}
+clear
+banner "Batocera Tailscale & SSH Setup (Core)"
+echo -e "${CYAN}Setup Tailscale, SSH (password or key), Samba file sharing, subnet routing, and exit node.${NC}"
 
-########################################
-# Paths & Defaults
-########################################
-INSTALL_DIR="/userdata/system/tailscale"
-BIN_DIR="$INSTALL_DIR/bin"
-SSH_DIR="/userdata/system/.ssh"
-KEYS_DIR="$INSTALL_DIR/keys"
-DROPBEAR_KEY="$SSH_DIR/id_dropbear"
-STATE_FILE="$INSTALL_DIR/tailscaled.state"
-SOCK_FILE="$INSTALL_DIR/tailscaled.sock"
-CUSTOM_SH="/userdata/system/custom.sh"
-CONFIG_FILE="$INSTALL_DIR/config.env"
-BACKUP_DIR="$INSTALL_DIR/backups"
-LOG_FILE="/tmp/tailscale_setup.log"
+# Check internet connection
+if ! ping -c 3 8.8.8.8 &>/dev/null; then
+    log "$RED" "ERROR: No internet connection detected. Connect to the internet and try again."
+    exit 1
+fi
+
+# Check if curl is installed
+if ! command -v curl &>/dev/null; then
+    log "$RED" "ERROR: curl is not installed. Please install it and rerun the script."
+    exit 1
+fi
+
+# Detect latest Tailscale version
+log "$BLUE" "Detecting latest Tailscale stable version for arm64..."
+progress_indicator 2 "Fetching version"
+LATEST_VERSION=$(curl -s "https://pkgs.tailscale.com/stable/" \
+    | grep -oP 'tailscale_\K[0-9]+\.[0-9]+\.[0-9]+(?=_arm64\.tgz)' \
+    | sort -V | tail -n 1)
+
+if [[ -z "$LATEST_VERSION" ]]; then
+    log "$RED" "ERROR: Could not fetch latest Tailscale version—falling back to 1.80.2."
+    TAILSCALE_VERSION="1.80.2"
+else
+    TAILSCALE_VERSION="$LATEST_VERSION"
+    log "$GREEN" "✅ Latest version detected: $TAILSCALE_VERSION"
+fi
+
+###############################################
+# Step 1: Tailscale Auth Key + Hostname + Tag
+###############################################
+log "$YELLOW" "Step 1: Tailscale Setup"
+
+read -rp "Enter your Tailscale auth key (from admin portal, starts with tskey-auth-): " AUTH_KEY
+[[ -z "$AUTH_KEY" ]] && { log "$RED" "ERROR: Auth key required."; exit 1; }
+[[ ! "$AUTH_KEY" =~ ^tskey-auth- ]] && { log "$RED" "ERROR: Invalid auth key format."; exit 1; }
+
+DEFAULT_HOSTNAME=$(hostname | cut -d'.' -f1)
+read -rp "Enter hostname (default: $DEFAULT_HOSTNAME): " USER_HOSTNAME
+HOSTNAME="${USER_HOSTNAME:-$DEFAULT_HOSTNAME}"
+
+# SSH key filenames based on hostname
+OPENSSH_KEY="$KEYS_DIR/id_ed25519_${HOSTNAME}"
 
 DEFAULT_TAG="tag:ssh-batocera"
-LOCAL_SSH_PORT="22"
-TEMP_SSH_PORT="2222"
-MAX_LOG_SIZE=10485760  # 10MB
+echo ""
+echo "Tag this device in Tailscale?"
+echo "1) Use default tag '$DEFAULT_TAG'"
+echo "2) No tag (simpler, recommended for beginners)"
+echo "3) Custom tag (e.g., tag:batocera)"
+read -rp "Select an option (1/2/3): " TAG_CHOICE
 
-########################################
-# Cleanup trap
-########################################
-cleanup_on_exit() {
-    local exit_code=$?
-    if [ $exit_code -ne 0 ]; then
-        error_box "Script encountered an error. Check $LOG_FILE for details."
-    fi
-    rm -f "$INSTALL_DIR"/*.tgz.tmp 2>/dev/null || true
-}
+TAG=""
+case "$TAG_CHOICE" in
+    1)
+        TAG="$DEFAULT_TAG"
+        ;;
+    3)
+        read -rp "Enter custom tag (e.g., tag:batocera): " TAG
+        if [[ -z "$TAG" ]]; then
+            log "$RED" "ERROR: Tag cannot be empty if custom is selected."
+            exit 1
+        fi
+        ;;
+    2|"")
+        TAG=""
+        ;;
+    *)
+        log "$YELLOW" "Unknown choice, continuing with NO tag."
+        TAG=""
+        ;;
+esac
 
-trap cleanup_on_exit EXIT
+###############################################
+# Step 2: SSH Authentication
+###############################################
+log "$YELLOW" "Step 2: SSH Authentication"
 
-########################################
-# Logging
-########################################
-init_logging() {
-    mkdir -p "$(dirname "$LOG_FILE")"
-    if [ -f "$LOG_FILE" ]; then
-        local log_size
-        log_size=$(stat -f%z "$LOG_FILE" 2>/dev/null || stat -c%s "$LOG_FILE" 2>/dev/null || echo 0)
-        if [ "$log_size" -gt $MAX_LOG_SIZE ]; then
-            mv "$LOG_FILE" "$LOG_FILE.old"
+if [ -f "$DROPBEAR_KEY" ]; then
+    log "$GREEN" "✅ SSH key detected—key authentication recommended."
+else
+    log "$YELLOW" "No SSH key detected—will generate one if you choose key auth."
+fi
+
+echo "Choose your SSH authentication method:"
+echo "1) Password (default: root/linux)"
+echo "2) Key-based authentication (recommended for security)"
+read -rp "Select an option (1/2): " SSH_CHOICE
+[[ "$SSH_CHOICE" == "2" ]] && AUTH_MODE="key" || AUTH_MODE="password"
+
+###############################################
+# Step 3: Subnet Routing
+###############################################
+log "$YELLOW" "Step 3: Subnet Routing"
+echo "Enable subnet routing to share your local network over Tailscale?"
+echo "1) Yes (recommended for full remote access)"
+echo "2) No (default)"
+read -rp "Select an option (1/2): " SUBNET_CHOICE
+
+SUBNET_ENABLE="no"
+SUBNET=""
+
+if [[ "$SUBNET_CHOICE" == "1" ]]; then
+    log "$BLUE" "Detecting network subnet..."
+    progress_indicator 1 "Scanning network"
+    GATEWAY_IP=$(ip route show default | awk '/default/ {print $3}')
+    if [[ -z "$GATEWAY_IP" ]]; then
+        log "$YELLOW" "WARNING: Could not auto-detect subnet."
+        read -rp "Enter your subnet (e.g., 192.168.50.0/24): " SUBNET
+    else
+        SUBNET=$(echo "$GATEWAY_IP" | awk -F. '{print $1"."$2"."$3".0/24"}')
+        log "$GREEN" "✅ Detected subnet: $SUBNET"
+        echo -e "${YELLOW}Note: Ensure no other device advertises this subnet in Tailscale.${NC}"
+        read -rp "Use this subnet ($SUBNET)? (yes/no): " CONFIRM_SUBNET
+        if [[ "$CONFIRM_SUBNET" != "yes" ]]; then
+            read -rp "Enter your subnet (e.g., 192.168.50.0/24): " SUBNET
         fi
     fi
-    echo "=== Tailscale Setup Log - $(date) ===" >> "$LOG_FILE"
-}
 
-log_exec() {
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] EXEC: $*" >> "$LOG_FILE"
-    "$@" >> "$LOG_FILE" 2>&1
-}
-
-########################################
-# Utility functions
-########################################
-need_root() {
-    if [ "$(id -u)" -ne 0 ]; then
-        error_box "This script must be run as root"
+    if [[ ! "$SUBNET" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}/[0-9]{1,2}$ ]]; then
+        log "$RED" "Invalid subnet format."
         exit 1
     fi
-}
-
-need_cmd() {
-    if ! command -v "$1" >/dev/null 2>&1; then
-        return 1
-    fi
-    return 0
-}
-
-net_ok() {
-    if ! ping -c 3 8.8.8.8 &>/dev/null; then
-        return 1
-    fi
-    return 0
-}
-
-wait_for_socket() {
-    local socket="$1"
-    local timeout="${2:-30}"
-    local elapsed=0
-    while [ $elapsed -lt $timeout ]; do
-        if [ -S "$socket" ]; then
-            return 0
-        fi
-        sleep 1
-        elapsed=$((elapsed + 1))
-    done
-    return 1
-}
-
-validate_subnet() {
-    local subnet="$1"
-    if [[ ! "$subnet" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}/[0-9]{1,2}$ ]]; then
-        return 1
-    fi
-    local IFS='./'
-    read -ra PARTS <<< "$subnet"
-    for i in {0..3}; do
-        if [ "${PARTS[$i]}" -gt 255 ]; then
-            return 1
-        fi
-    done
-    if [ "${PARTS[4]}" -gt 32 ]; then
-        return 1
-    fi
-    return 0
-}
-
-validate_authkey() {
-    local key="$1"
-    [[ "$key" =~ ^tskey-auth- ]] || return 1
-    return 0
-}
-
-latest_tailscale() {
-    local version
-    version=$(curl -s "https://pkgs.tailscale.com/stable/" 2>/dev/null \
-        | grep -oP 'tailscale_\K[0-9]+\.[0-9]+\.[0-9]+(?=_arm64\.tgz)' \
-        | sort -V | tail -n1)
-    if [ -n "$version" ]; then
-        echo "$version"
-        return 0
-    fi
-    return 1
-}
-
-########################################
-# Configuration Management
-########################################
-save_config() {
-    local hostname="$1"
-    local tag="$2"
-    local subnet="${3:-}"
-    local subnet_enable="${4:-no}"
-    local exit_node_enable="${5:-no}"
-    local auth_mode="${6:-password}"
-
-    cat > "$CONFIG_FILE" << EOF
-# Tailscale Configuration
-# Generated: $(date)
-HOSTNAME="$hostname"
-TAG="$tag"
-SUBNET="$subnet"
-SUBNET_ENABLE="$subnet_enable"
-EXIT_NODE_ENABLE="$exit_node_enable"
-AUTH_MODE="$auth_mode"
-EOF
-    chmod 600 "$CONFIG_FILE"
-}
-
-load_config() {
-    if [ -f "$CONFIG_FILE" ]; then
-        # shellcheck disable=SC1090
-        source "$CONFIG_FILE"
-        return 0
-    fi
-    return 1
-}
-
-########################################
-# Backup & Restore
-########################################
-create_backup() {
-    log "$BLUE" "Creating backup..."
-
-    mkdir -p "$BACKUP_DIR"
-    local backup_name="backup_$(date +%Y%m%d_%H%M%S)"
-    local backup_path="$BACKUP_DIR/$backup_name"
-    mkdir -p "$backup_path"
-
-    [ -f "$BIN_DIR/tailscale" ] && cp -p "$BIN_DIR/tailscale" "$backup_path/" 2>/dev/null || true
-    [ -f "$BIN_DIR/tailscaled" ] && cp -p "$BIN_DIR/tailscaled" "$backup_path/" 2>/dev/null || true
-    [ -f "$STATE_FILE" ] && cp -p "$STATE_FILE" "$backup_path/"
-    [ -f "$CONFIG_FILE" ] && cp -p "$CONFIG_FILE" "$backup_path/"
-    [ -f "$CUSTOM_SH" ] && cp -p "$CUSTOM_SH" "$backup_path/"
-
-    success_box "Backup created: $backup_name"
-    echo "$backup_path" > "$INSTALL_DIR/.last_backup"
-
-    local backup_count
-    backup_count=$(ls -1 "$BACKUP_DIR" 2>/dev/null | wc -l)
-    if [ "$backup_count" -gt 5 ]; then
-        ls -1t "$BACKUP_DIR" | tail -n +6 | xargs -I {} rm -rf "$BACKUP_DIR/{}" 2>/dev/null || true
-    fi
-}
-
-restore_backup() {
-    local backup_path="${1:-$(cat "$INSTALL_DIR/.last_backup" 2>/dev/null || true)}"
-    if [ -z "$backup_path" ] || [ ! -d "$backup_path" ]; then
-        error_box "Backup not found: $backup_path"
-        return 1
-    fi
-
-    log "$BLUE" "Restoring from backup..."
-
-    pkill -f "$BIN_DIR/tailscaled" 2>/dev/null || true
-    sleep 2
-
-    [ -f "$backup_path/tailscale" ] && cp -p "$backup_path/tailscale" "$BIN_DIR/"
-    [ -f "$backup_path/tailscaled" ] && cp -p "$backup_path/tailscaled" "$BIN_DIR/"
-    [ -f "$backup_path/tailscaled.state" ] && cp -p "$backup_path/tailscaled.state" "$STATE_FILE"
-    [ -f "$backup_path/config.env" ] && cp -p "$backup_path/config.env" "$CONFIG_FILE"
-    [ -f "$backup_path/custom.sh" ] && cp -p "$backup_path/custom.sh" "$CUSTOM_SH"
-
-    if [ -f "$BIN_DIR/tailscale" ]; then
-        chmod +x "$BIN_DIR/tailscale" "$BIN_DIR/tailscaled"
-    fi
-
-    success_box "Backup restored successfully"
-}
-
-########################################
-# Status & Diagnostics
-########################################
-show_status() {
-    clear
-    banner "Tailscale Status Check (v17.2)"
-
-    if [ ! -x "$BIN_DIR/tailscale" ]; then
-        error_box "Tailscale not installed"
-        echo ""
-        info_box "Run the installation first"
-        return 1
-    fi
-
-    if ! pgrep -f "$BIN_DIR/tailscaled" >/dev/null; then
-        warn_box "Tailscaled is not running"
-        echo ""
-        read -rp "Start Tailscaled now? (yes/no): " start
-        if [ "${start:-yes}" = "yes" ]; then
-            restart_tailscaled
-            sleep 3
-        else
-            return 1
-        fi
-    else
-        success_box "Tailscaled is running (PID: $(pgrep -f "$BIN_DIR/tailscaled"))"
-    fi
-
-    echo ""
-    step_box "Version Information"
-    local version
-    version=$("$BIN_DIR/tailscale" version 2>/dev/null | head -n1 || echo "unknown")
-    echo "  ${BULLET} Tailscale: $version"
-
-    echo ""
-    step_box "Network Information"
-    if [ -S "$SOCK_FILE" ]; then
-        local ts_ip
-        ts_ip=$("$BIN_DIR/tailscale" --socket="$SOCK_FILE" ip -4 2>/dev/null || echo "not connected")
-        echo "  ${BULLET} Tailscale IP: $ts_ip"
-        local local_ip
-        local_ip=$(ip -4 addr show | grep -oE "inet [0-9]+\.[0-9]+\.[0-9]+\.[0-9]+" | awk '{print $2}' | grep -v "127.0.0.1" | head -n 1)
-        echo "  ${BULLET} Local IP: ${local_ip:-unknown}"
-    else
-        error_box "Socket not available"
-    fi
-
-    echo ""
-    step_box "Configuration"
-    if load_config 2>/dev/null; then
-        echo "  ${BULLET} Hostname: ${HOSTNAME:-not set}"
-        if [ -n "${TAG:-}" ]; then
-            echo "  ${BULLET} Tag: ${TAG}"
-        else
-            echo "  ${BULLET} Tag: (none)"
-        fi
-        echo "  ${BULLET} Auth Mode: ${AUTH_MODE:-unknown}"
-        echo "  ${BULLET} Subnet Routing: ${SUBNET_ENABLE:-no}"
-        [ "${SUBNET_ENABLE:-no}" = "yes" ] && echo "    ${ARROW} Subnet: ${SUBNET}"
-        echo "  ${BULLET} Exit Node: ${EXIT_NODE_ENABLE:-no}"
-    else
-        warn_box "No configuration file found"
-    fi
-
-    echo ""
-    step_box "SSH Status"
-    if pgrep -f "dropbear.*-p 22" >/dev/null; then
-        success_box "Dropbear SSH running on port 22"
-    else
-        warn_box "Dropbear SSH not running"
-    fi
-
-    echo ""
-    step_box "Services"
-    if pgrep -f smbd >/dev/null; then
-        success_box "Samba file sharing is running"
-    else
-        warn_box "Samba is not running"
-    fi
-
-    echo ""
-    info_box "Logs: /tmp/tailscaled.log and $LOG_FILE"
-}
-
-########################################
-# Restart Tailscaled
-########################################
-restart_tailscaled() {
-    log "$BLUE" "Restarting Tailscale daemon..."
-
-    pkill -f "$BIN_DIR/tailscaled" 2>/dev/null || true
-    sleep 2
-
-    rm -f "$SOCK_FILE" 2>/dev/null || true
-
-    mkdir -p /var/run/tailscale
-    ln -sf "$SOCK_FILE" /var/run/tailscale/tailscaled.sock 2>/dev/null || true
-
-    log_exec "$BIN_DIR/tailscaled" \
-        --state="$STATE_FILE" \
-        --socket="$SOCK_FILE" \
-        --tun=userspace-networking \
-        --verbose=1 &
-
-    if ! wait_for_socket "$SOCK_FILE" 30; then
-        error_box "Failed to start tailscaled"
-        return 1
-    fi
-
-    if load_config 2>/dev/null; then
-        local UP_ARGS="--accept-routes"
-        [ -n "${TAG:-}" ] && UP_ARGS+=" --advertise-tags=$TAG"
-        [ "${SUBNET_ENABLE:-no}" = "yes" ] && [ -n "${SUBNET:-}" ] && UP_ARGS+=" --advertise-routes=$SUBNET"
-        [ "${EXIT_NODE_ENABLE:-no}" = "yes" ] && UP_ARGS+=" --advertise-exit-node"
-
-        log_exec "$BIN_DIR/tailscale" --socket="$SOCK_FILE" up $UP_ARGS || true
-        sleep 2
-    fi
-
-    success_box "Tailscaled restarted successfully"
-}
-
-########################################
-# Self-update with backup
-########################################
-update_tailscale() {
-    clear
-    banner "Self-Update Tailscale (v17.2)"
-
-    if [ ! -x "$BIN_DIR/tailscale" ]; then
-        error_box "Tailscale not found in $BIN_DIR"
-        return 1
-    fi
-
-    local current_version
-    current_version=$("$BIN_DIR/tailscale" version 2>/dev/null | head -n1 | awk '{print $1}' || echo "unknown")
-    info_box "Current version: $current_version"
-
-    log "$BLUE" "Checking for latest version..."
-    progress_indicator 2 "Fetching version info"
-
-    local latest_version
-    if ! latest_version=$(latest_tailscale); then
-        error_box "Could not detect latest version"
-        return 1
-    fi
-
-    info_box "Latest stable version: $latest_version"
-
-    if [ "$current_version" = "$latest_version" ]; then
-        success_box "Already running the latest version!"
-        return 0
-    fi
-
-    echo ""
-    warn_box "This will update from $current_version to $latest_version"
-    read -rp "Continue with update? (yes/no): " confirm
-    if [ "${confirm:-no}" != "yes" ]; then
-        info_box "Update cancelled"
-        return 0
-    fi
-
-    create_backup
-
-    local url="https://pkgs.tailscale.com/stable/tailscale_${latest_version}_arm64.tgz"
-    local tgz="$INSTALL_DIR/tsupdate_${latest_version}.tgz.tmp"
-
-    log "$BLUE" "Downloading update..."
-    if ! wget -q -O "$tgz" "$url" 2>&1; then
-        error_box "Download failed"
-        rm -f "$tgz"
-        read -rp "Restore from backup? (yes/no): " restore
-        if [ "${restore:-yes}" = "yes" ]; then
-            restore_backup
-        fi
-        return 1
-    fi
-
-    log "$BLUE" "Extracting and installing..."
-    progress_indicator 3 "Installing binaries"
-
-    if ! tar -xzf "$tgz" -C "$INSTALL_DIR" \
-        "tailscale_${latest_version}_arm64/tailscale" \
-        "tailscale_${latest_version}_arm64/tailscaled" 2>/dev/null; then
-        error_box "Extract failed"
-        rm -f "$tgz"
-        return 1
-    fi
-
-    install -m 0755 "$INSTALL_DIR/tailscale_${latest_version}_arm64/tailscale" "$BIN_DIR/tailscale"
-    install -m 0755 "$INSTALL_DIR/tailscale_${latest_version}_arm64/tailscaled" "$BIN_DIR/tailscaled"
-
-    rm -rf "$INSTALL_DIR/tailscale_${latest_version}_arm64" "$tgz"
-
-    success_box "Binaries updated successfully"
-
-    echo ""
-    info_box "Restarting tailscaled (brief tunnel interruption)..."
-    restart_tailscaled
-
-    echo ""
-    local new_version
-    new_version=$("$BIN_DIR/tailscale" version 2>/dev/null | head -n1 || echo "unknown")
-    success_box "Update complete! Now running: $new_version"
-}
-
-########################################
-# Main Installation / Repair
-########################################
-install_or_repair() {
-    clear
-    banner "Batocera Tailscale & SSH Setup (v17.2)"
-    echo -e "${CYAN}Setup Tailscale, SSH (password or key), Samba file sharing, subnet routing, and exit node.${NC}\n"
-
-    log "$YELLOW" "Running pre-flight checks..."
-
-    if ! net_ok; then
-        error_box "No internet connection detected. Connect to the internet and try again."
-        exit 1
-    fi
-    success_box "Internet connectivity OK"
-
-    if ! need_cmd curl; then
-        error_box "curl is not installed. Please install it and rerun the script."
-        exit 1
-    fi
-    success_box "Required commands available"
-
-    log "$BLUE" "Detecting latest Tailscale stable version for arm64..."
-    progress_indicator 2 "Fetching version"
-
-    local TAILSCALE_VERSION
-    if TAILSCALE_VERSION=$(latest_tailscale); then
-        log "$GREEN" "✅ Latest version detected: $TAILSCALE_VERSION"
-    else
-        TAILSCALE_VERSION="1.80.2"
-        warn_box "Could not fetch latest version—falling back to $TAILSCALE_VERSION"
-    fi
-
-    if [ -f "$BIN_DIR/tailscale" ]; then
-        create_backup
-    fi
-
-    log "$YELLOW" "Step 1: Tailscale Setup"
-    local AUTH_KEY
-    while true; do
-        read -rp "Enter your Tailscale auth key (tskey-auth-...): " AUTH_KEY
-        if [ -z "$AUTH_KEY" ]; then
-            error_box "Auth key required"
-            continue
-        fi
-        if ! validate_authkey "$AUTH_KEY"; then
-            error_box "Invalid auth key format (expected tskey-auth-...)"
-            continue
-        fi
-        break
-    done
-
-    local HOSTNAME
-    local DEFAULT_HOSTNAME
-    DEFAULT_HOSTNAME=$(hostname | cut -d'.' -f1)
-    read -rp "Enter hostname (default: $DEFAULT_HOSTNAME): " USER_HOSTNAME
-    HOSTNAME="${USER_HOSTNAME:-$DEFAULT_HOSTNAME}"
-
-    local OPENSSH_KEY="$KEYS_DIR/id_ed25519_${HOSTNAME}"
-
-    # TAG SELECTION (tag is now OPTIONAL)
-    local TAG=""
-    echo ""
-    echo "Tag this device in Tailscale?"
-    echo "1) Use default tag '$DEFAULT_TAG'"
-    echo "2) No tag (simpler, recommended for beginners)"
-    echo "3) Custom tag (e.g., tag:batocera)"
-    read -rp "Select (1/2/3): " TAG_CHOICE
-    case "$TAG_CHOICE" in
-        1)
-            TAG="$DEFAULT_TAG"
-            ;;
-        3)
-            read -rp "Enter custom tag (e.g., tag:batocera): " TAG
-            if [ -z "$TAG" ]; then
-                error_box "Tag required"
-                exit 1
-            fi
-            ;;
-        2|"")
-            TAG=""
-            ;;
-        *)
-            TAG=""
-            ;;
-    esac
-
-    log "$YELLOW" "Step 2: SSH Authentication"
-    local AUTH_MODE
-    if [ -f "$DROPBEAR_KEY" ]; then
-        log "$GREEN" "✅ SSH key detected—key authentication recommended."
-    else
-        log "$YELLOW" "No SSH key detected—will generate one if you choose key auth."
-    fi
-    echo "Choose your SSH authentication method:"
-    echo "1) Password (default: root/linux)"
-    echo "2) Key-based authentication (recommended for security)"
-    read -rp "Select (1/2): " SSH_CHOICE
-    [[ "$SSH_CHOICE" == "2" ]] && AUTH_MODE="key" || AUTH_MODE="password"
-
-    log "$YELLOW" "Step 3: Subnet Routing"
-    local SUBNET_ENABLE SUBNET
-    echo "Enable subnet routing to share your local network over Tailscale?"
-    echo "1) Yes (recommended for full remote access)"
-    echo "2) No (default)"
-    read -rp "Select (1/2): " SUBNET_CHOICE
-    if [[ "$SUBNET_CHOICE" == "1" ]]; then
-        log "$BLUE" "Detecting network subnet..."
-        progress_indicator 1 "Scanning network"
-
-        local GATEWAY_IP
-        GATEWAY_IP=$(ip route show default 2>/dev/null | awk '/default/ {print $3; exit}')
-        if [[ -n "$GATEWAY_IP" ]]; then
-            SUBNET=$(echo "$GATEWAY_IP" | awk -F. '{print $1"."$2"."$3".0/24"}')
-            log "$GREEN" "✅ Detected subnet: $SUBNET"
-            echo -e "${YELLOW}Note: Ensure no other device advertises this subnet in Tailscale.${NC}"
-            read -rp "Use this subnet ($SUBNET)? (yes/no): " CONFIRM_SUBNET
-            if [[ "$CONFIRM_SUBNET" != "yes" ]]; then
-                while true; do
-                    read -rp "Enter your subnet (e.g., 192.168.1.0/24): " SUBNET
-                    if validate_subnet "$SUBNET"; then
-                        break
-                    fi
-                    error_box "Invalid subnet format"
-                done
-            fi
-        else
-            while true; do
-                read -rp "Enter your subnet (e.g., 192.168.1.0/24): " SUBNET
-                if validate_subnet "$SUBNET"; then
-                    break
-                fi
-                error_box "Invalid subnet format"
-            done
-        fi
-        SUBNET_ENABLE="yes"
-    else
-        SUBNET_ENABLE="no"
-        SUBNET=""
-    fi
-
-    log "$YELLOW" "Step 4: Exit Node"
-    local EXIT_NODE_ENABLE
-    echo "Configure this device as a Tailscale exit node?"
-    echo "This allows other Tailscale devices to route internet traffic through this device."
-    echo "1) Yes (enable exit node)"
-    echo "2) No (default)"
-    read -rp "Select (1/2): " EXIT_NODE_CHOICE
-    if [[ "$EXIT_NODE_CHOICE" == "1" ]]; then
-        EXIT_NODE_ENABLE="yes"
-        log "$GREEN" "✅ Exit node will be enabled"
-        echo -e "${YELLOW}Note: You'll need to authorize this exit node in the Tailscale admin console.${NC}"
-    else
-        EXIT_NODE_ENABLE="no"
-    fi
-
-    log "$BLUE" "Detecting local IP..."
-    local LOCAL_IP
-    LOCAL_IP=$(ip -4 addr show | grep -oE "inet [0-9]+\.[0-9]+\.[0-9]+\.[0-9]+" | awk '{print $2}' | grep -v "127.0.0.1" | head -n 1)
+    SUBNET_ENABLE="yes"
+fi
+
+###############################################
+# Step 4: Exit Node
+###############################################
+log "$YELLOW" "Step 4: Exit Node"
+echo "Configure this device as a Tailscale exit node?"
+echo "This allows other Tailscale devices to route internet traffic through this device."
+echo "1) Yes (enable exit node)"
+echo "2) No (default)"
+read -rp "Select an option (1/2): " EXIT_NODE_CHOICE
+
+EXIT_NODE_ENABLE="no"
+if [[ "$EXIT_NODE_CHOICE" == "1" ]]; then
+    EXIT_NODE_ENABLE="yes"
+    log "$GREEN" "✅ Exit node will be enabled"
+    echo -e "${YELLOW}Note: You'll need to authorize this exit node in the Tailscale admin console.${NC}"
+fi
+
+###############################################
+# Detect Local IP
+###############################################
+log "$BLUE" "Detecting local IP..."
+LOCAL_IP=$(ip -4 addr show | grep -oE "inet [0-9]+\.[0-9]+\.[0-9]+\.[0-9]+" \
+    | awk '{print $2}' | grep -v "127.0.0.1" | head -n 1)
+
+if [[ -z "$LOCAL_IP" || ! "$LOCAL_IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    log "$YELLOW" "⚠️ Could not detect valid local IP, attempting alternate methods..."
+    LOCAL_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
     if [[ -z "$LOCAL_IP" || ! "$LOCAL_IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-        log "$YELLOW" "⚠️ Could not detect valid local IP, attempting alternate methods..."
-        LOCAL_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
+        log "$RED" "ERROR: Could not detect valid local IP."
+        read -rp "Please enter your device's local IP address: " LOCAL_IP
         if [[ -z "$LOCAL_IP" || ! "$LOCAL_IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            error_box "Could not detect valid local IP."
-            read -rp "Please enter your device's local IP address: " LOCAL_IP
-            if [[ -z "$LOCAL_IP" || ! "$LOCAL_IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-                error_box "Invalid IP format. Exiting."
-                exit 1
-            fi
+            log "$RED" "ERROR: Invalid IP format. Exiting."
+            exit 1
         fi
     fi
-    log "$GREEN" "✅ Local IP: $LOCAL_IP"
+fi
+log "$GREEN" "✅ Local IP: $LOCAL_IP"
 
-    # SSH key setup
-    if [[ "$AUTH_MODE" == "key" ]]; then
-        log "$BLUE" "Configuring SSH key authentication..."
-        mkdir -p "$SSH_DIR" "$KEYS_DIR" /etc/dropbear
-        chmod 700 "$SSH_DIR" "$KEYS_DIR" /etc/dropbear
-        if [ ! -f "$DROPBEAR_KEY" ]; then
-            log "$GREEN" "🔑 Generating SSH key..."
-            progress_indicator 3 "Forging key"
-            dropbearkey -t ed25519 -f "$DROPBEAR_KEY" || { error_box "Key gen failed."; exit 1; }
-            chmod 600 "$DROPBEAR_KEY"
-            dropbearkey -y -f "$DROPBEAR_KEY" | grep "^ssh-ed25519" > /etc/dropbear/authorized_keys || { error_box "Pubkey failed."; exit 1; }
-            chmod 600 /etc/dropbear/authorized_keys
-        fi
-        dropbearconvert dropbear openssh "$DROPBEAR_KEY" "$OPENSSH_KEY" || { error_box "Key conversion failed."; exit 1; }
-        chmod 600 "$OPENSSH_KEY"
+###############################################
+# SSH Key Setup (if key mode)
+###############################################
+if [[ "$AUTH_MODE" == "key" ]]; then
+    log "$BLUE" "Configuring SSH key authentication..."
+    mkdir -p "$SSH_DIR" "$KEYS_DIR" /etc/dropbear
+    chmod 700 "$SSH_DIR" "$KEYS_DIR" /etc/dropbear
+
+    if [ ! -f "$DROPBEAR_KEY" ]; then
+        log "$GREEN" "🔑 Generating SSH key..."
+        progress_indicator 3 "Forging key"
+        dropbearkey -t ed25519 -f "$DROPBEAR_KEY" || { log "$RED" "Key gen failed."; exit 1; }
+        chmod 600 "$DROPBEAR_KEY"
+        dropbearkey -y -f "$DROPBEAR_KEY" | grep "^ssh-ed25519" > /etc/dropbear/authorized_keys || { log "$RED" "Pubkey failed."; exit 1; }
+        chmod 600 /etc/dropbear/authorized_keys
     fi
 
-    log "$BLUE" "Configuring Dropbear..."
-    mkdir -p /etc/dropbear
-    touch /etc/dropbear/dropbear.conf
-    [[ ! -w /etc/dropbear/dropbear.conf ]] && { error_box "Cannot write Dropbear config."; exit 1; }
-    sed -i '/^PasswordAuth/d' /etc/dropbear/dropbear.conf 2>/dev/null || true
+    dropbearconvert dropbear openssh "$DROPBEAR_KEY" "$OPENSSH_KEY" || { log "$RED" "Key conversion failed."; exit 1; }
+    chmod 600 "$OPENSSH_KEY"
+fi
+
+###############################################
+# Dropbear Configuration
+###############################################
+log "$BLUE" "Configuring Dropbear..."
+mkdir -p /etc/dropbear
+touch /etc/dropbear/dropbear.conf
+if [[ ! -w /etc/dropbear/dropbear.conf ]]; then
+    log "$RED" "ERROR: Cannot write Dropbear config."
+    exit 1
+fi
+sed -i '/^PasswordAuth/d' /etc/dropbear/dropbear.conf 2>/dev/null || true
+
+if [[ "$AUTH_MODE" == "key" ]]; then
     echo "PasswordAuth yes" > /etc/dropbear/dropbear.conf
-    if [[ "$AUTH_MODE" == "key" ]]; then
-        log "$YELLOW" "⚠️ Password auth temporarily enabled for key transfer"
-    else
-        log "$GREEN" "✅ Password authentication enabled"
-    fi
+    log "$YELLOW" "⚠️ Password auth enabled until key is confirmed."
+else
+    echo "PasswordAuth yes" > /etc/dropbear/dropbear.conf
+    log "$GREEN" "✅ Password authentication enabled"
+fi
 
-    log "$BLUE" "Configuring Samba for file sharing..."
-    mkdir -p /etc/samba
-    cat > /etc/samba/smb.conf <<'EOF_SMBCFG'
+###############################################
+# Samba Configuration
+###############################################
+log "$BLUE" "Configuring Samba for file sharing..."
+mkdir -p /etc/samba
+cat > /etc/samba/smb.conf <<EOF
 [global]
 workgroup = WORKGROUP
 server string = Batocera Share
@@ -699,6 +277,7 @@ fruit:resource = file
 fruit:metadata = stream
 security = user
 map to guest = Bad User
+
 [share]
 path = /userdata
 writeable = yes
@@ -706,316 +285,261 @@ guest ok = yes
 create mask = 0666
 directory mask = 0777
 force user = root
-EOF_SMBCFG
+EOF
 
-    if ! pgrep -f "smbd" > /dev/null; then
-        smbd -D -s /etc/samba/smb.conf || { error_box "Samba start failed."; exit 1; }
-    else
-        log "$YELLOW" "Samba already running—skipping restart."
-    fi
+if ! pgrep -f "smbd" > /dev/null; then
+    smbd -D -s /etc/samba/smb.conf || { log "$RED" "Samba start failed."; exit 1; }
+else
+    log "$YELLOW" "Samba already running—skipping restart."
+fi
 
-    log "$BLUE" "Installing Tailscale $TAILSCALE_VERSION..."
-    progress_indicator 5 "Downloading Tailscale"
+###############################################
+# Tailscale Installation
+###############################################
+log "$BLUE" "Installing Tailscale $TAILSCALE_VERSION..."
+progress_indicator 5 "Downloading Tailscale"
 
-    mkdir -p "$BIN_DIR"
-    wget -q -O "$INSTALL_DIR/tailscale.tgz" "https://pkgs.tailscale.com/stable/tailscale_${TAILSCALE_VERSION}_arm64.tgz" || { error_box "Download failed."; exit 1; }
-    tar -xzf "$INSTALL_DIR/tailscale.tgz" -C "$BIN_DIR" --strip-components=1 || { error_box "Extraction failed."; exit 1; }
-    rm "$INSTALL_DIR/tailscale.tgz"
-    chmod +x "$BIN_DIR/tailscale" "$BIN_DIR/tailscaled"
+mkdir -p "$INSTALL_DIR/bin"
+wget -q -O "$INSTALL_DIR/tailscale.tgz" "https://pkgs.tailscale.com/stable/tailscale_${TAILSCALE_VERSION}_arm64.tgz" \
+    || { log "$RED" "Download failed."; exit 1; }
+tar -xzf "$INSTALL_DIR/tailscale.tgz" -C "$INSTALL_DIR/bin" --strip-components=1 \
+    || { log "$RED" "Extraction failed."; exit 1; }
+rm "$INSTALL_DIR/tailscale.tgz"
+chmod +x "$INSTALL_DIR/bin/tailscale" "$INSTALL_DIR/bin/tailscaled"
 
-    log "$BLUE" "Starting Tailscale..."
-    progress_indicator 3 "Starting Tailscale"
+log "$BLUE" "Starting Tailscale..."
+progress_indicator 3 "Starting Tailscale"
 
-    pkill -f "tailscaled" 2>/dev/null || true
-    mkdir -p /dev/net
-    [ ! -c /dev/net/tun ] && mknod /dev/net/tun c 10 200 && chmod 600 /dev/net/tun
+pkill -f "tailscaled" 2>/dev/null || true
+mkdir -p /var/run/tailscale
+ln -sf "$INSTALL_DIR/tailscaled.sock" /var/run/tailscale/tailscaled.sock
 
-    mkdir -p /var/run/tailscale
-    ln -sf "$SOCK_FILE" /var/run/tailscale/tailscaled.sock
+"$INSTALL_DIR/bin/tailscaled" \
+    --state="$INSTALL_DIR/tailscaled.state" \
+    --socket="$INSTALL_DIR/tailscaled.sock" \
+    --tun=userspace-networking \
+    --verbose=1 > /tmp/tailscaled.log 2>&1 &
 
-    "$BIN_DIR/tailscaled" \
-        --state="$STATE_FILE" \
-        --socket="$SOCK_FILE" \
-        --tun=userspace-networking \
-        --verbose=1 > /tmp/tailscaled.log 2>&1 &
+sleep 10
 
-    sleep 10
+# Build argument sets (one for initial auth, one for persistence)
+PERSIST_TAILSCALE_ARGS="--hostname=$HOSTNAME --accept-routes"
+if [ -n "$TAG" ]; then
+    PERSIST_TAILSCALE_ARGS="$PERSIST_TAILSCALE_ARGS --advertise-tags=$TAG"
+fi
+if [ "$SUBNET_ENABLE" = "yes" ]; then
+    PERSIST_TAILSCALE_ARGS="$PERSIST_TAILSCALE_ARGS --advertise-routes=$SUBNET"
+fi
+if [ "$EXIT_NODE_ENABLE" = "yes" ]; then
+    PERSIST_TAILSCALE_ARGS="$PERSIST_TAILSCALE_ARGS --advertise-exit-node"
+fi
 
-    local TAILSCALE_ARGS="--authkey=$AUTH_KEY --hostname=$HOSTNAME --accept-routes"
-    [ -n "$TAG" ] && TAILSCALE_ARGS="$TAILSCALE_ARGS --advertise-tags=$TAG"
-    [[ "$SUBNET_ENABLE" == "yes" ]] && TAILSCALE_ARGS="$TAILSCALE_ARGS --advertise-routes=$SUBNET"
-    [[ "$EXIT_NODE_ENABLE" == "yes" ]] && TAILSCALE_ARGS="$TAILSCALE_ARGS --advertise-exit-node"
+TAILSCALE_ARGS="--authkey=$AUTH_KEY $PERSIST_TAILSCALE_ARGS"
 
-    "$BIN_DIR/tailscale" --socket="$SOCK_FILE" up $TAILSCALE_ARGS > /tmp/tailscaled.log 2>&1 || {
-        error_box "Tailscale connection failed:"
-        cat /tmp/tailscaled.log
-        exit 1
-    }
+"$INSTALL_DIR/bin/tailscale" --socket="$INSTALL_DIR/tailscaled.sock" up $TAILSCALE_ARGS > /tmp/tailscaled.log 2>&1 \
+    || { log "$RED" "Tailscale failed:"; cat /tmp/tailscaled.log; exit 1; }
 
+sleep 5
+
+# Verify Tailscale is Running
+if ! "$INSTALL_DIR/bin/tailscale" --socket="$INSTALL_DIR/tailscaled.sock" status &>/dev/null; then
+    log "$RED" "ERROR: Tailscale is not running. Check logs with 'cat /tmp/tailscaled.log'"
+    exit 1
+fi
+
+# Get Tailscale IP
+log "$BLUE" "Waiting for Tailscale IP..."
+TRIES=0
+TAILSCALE_IP=""
+while [[ -z "$TAILSCALE_IP" && $TRIES -lt 10 ]]; do
+    sleep 3
+    TAILSCALE_IP=$("$INSTALL_DIR/bin/tailscale" --socket="$INSTALL_DIR/tailscaled.sock" ip -4 2>/dev/null)
+    ((TRIES++))
+done
+
+if [[ -z "$TAILSCALE_IP" ]]; then
+    log "$YELLOW" "⚠️ No Tailscale IPv4 IP reported; using local IP as fallback."
+    TAILSCALE_IP="$LOCAL_IP"
+else
+    log "$GREEN" "✅ Tailscale IP: $TAILSCALE_IP"
+fi
+
+###############################################
+# SSH Key Download & Test (key mode)
+###############################################
+if [[ "$AUTH_MODE" == "key" ]]; then
+    banner "SSH Key Download and Testing"
+    echo -e "${CYAN}Download your SSH key and config—follow these steps:${NC}"
+
+    log "$BLUE" "Starting temporary Dropbear on port 2222 (password mode)..."
+    pkill -f "dropbear.*2222" 2>/dev/null || true
+    /usr/sbin/dropbear -p 2222 || { log "$RED" "Dropbear failed on 2222."; exit 1; }
     sleep 5
 
-    if ! "$BIN_DIR/tailscale" --socket="$SOCK_FILE" status &>/dev/null; then
-        error_box "Tailscale is not running. Check logs with 'cat /tmp/tailscaled.log'"
-        exit 1
-    fi
+    log "$YELLOW" "1. Open a NEW terminal on your client machine."
 
-    log "$BLUE" "Waiting for Tailscale IP..."
-    local TRIES=0
-    local TAILSCALE_IP=""
-    while [[ -z "$TAILSCALE_IP" && $TRIES -lt 10 ]]; do
-        sleep 3
-        TAILSCALE_IP=$("$BIN_DIR/tailscale" --socket="$SOCK_FILE" ip -4 2>/dev/null)
-        ((TRIES++))
-    done
+    log "$YELLOW" "2. Download the SSH key (Windows PowerShell example):"
+    echo "scp -P 2222 root@$LOCAL_IP:$OPENSSH_KEY \"C:\\Users\\\$env:USERNAME\\.ssh\\id_ed25519_${HOSTNAME}\""
+    log "$CYAN" "   - Password: linux"
 
-    if [[ -z "$TAILSCALE_IP" ]]; then
-        warn_box "Could not get Tailscale IP, using local IP"
-        TAILSCALE_IP="$LOCAL_IP"
+    log "$YELLOW" "   Linux/macOS example:"
+    echo "scp -P 2222 root@$LOCAL_IP:$OPENSSH_KEY ~/.ssh/id_ed25519_${HOSTNAME}"
+
+    log "$YELLOW" "3. (Windows) Fix key permissions:"
+    echo "icacls \"C:\\Users\\\$env:USERNAME\\.ssh\\id_ed25519_${HOSTNAME}\" /inheritance:r /grant:r \"\$env:USERNAME:F\""
+
+    log "$YELLOW" "4. Download SSH config snippet:"
+    cat > /tmp/ssh_config_${HOSTNAME} <<EOF_CFG
+Host ${HOSTNAME}-tailscale
+    HostName $TAILSCALE_IP
+    User root
+    IdentityFile ~/.ssh/id_ed25519_${HOSTNAME}
+    StrictHostKeyChecking no
+EOF_CFG
+    chmod 600 /tmp/ssh_config_${HOSTNAME}
+
+    echo "scp -P 2222 root@$LOCAL_IP:/tmp/ssh_config_${HOSTNAME} \"C:\\Users\\\$env:USERNAME\\.ssh\\config_${HOSTNAME}\""
+    log "$CYAN" "   - Linux/macOS: scp -P 2222 root@$LOCAL_IP:/tmp/ssh_config_${HOSTNAME} ~/.ssh/config_${HOSTNAME}"
+
+    log "$YELLOW" "5. Append to existing SSH config (optional, Windows):"
+    echo "type \"C:\\Users\\\$env:USERNAME\\.ssh\\config_${HOSTNAME}\" >> \"C:\\Users\\\$env:USERNAME\\.ssh\\config\""
+
+    log "$YELLOW" "   Linux/macOS:"
+    echo "cat ~/.ssh/config_${HOSTNAME} >> ~/.ssh/config"
+
+    log "$YELLOW" "6. Test SSH using the key (no password prompt):"
+    echo "ssh -i \"C:\\Users\\\$env:USERNAME\\.ssh\\id_ed25519_${HOSTNAME}\" root@$LOCAL_IP -p 2222"
+    echo "   or (after config) ssh ${HOSTNAME}-tailscale"
+
+    log "$CYAN" "   - Linux/macOS: ssh -i ~/.ssh/id_ed25519_${HOSTNAME} root@$LOCAL_IP -p 2222"
+
+    read -rp "Did SSH with the key on port 2222 work? (yes/no): " KEY_WORKS
+
+    if [[ "$KEY_WORKS" =~ ^[Yy]es$ ]]; then
+        log "$GREEN" "✅ Key confirmed!"
+        echo "PasswordAuth no" > /etc/dropbear/dropbear.conf
+        log "$BLUE" "Locking main SSH (port 22) to key-only..."
+        if ! pgrep -f "dropbear.*-p 22" > /dev/null; then
+            pkill -f "dropbear" 2>/dev/null || true
+            sleep 1
+            /usr/sbin/dropbear -s -p 22 || { log "$RED" "Dropbear failed on 22!"; exit 1; }
+            log "$GREEN" "✅ Dropbear restarted with key-only settings on port 22"
+        else
+            log "$YELLOW" "⚠️ Dropbear already running on 22; key-only mode will apply on next reboot."
+        fi
     else
-        log "$GREEN" "✅ Tailscale IP: $TAILSCALE_IP"
+        log "$RED" "❌ Key test failed—leaving password auth enabled. Fix key on your client, then rerun later if desired."
     fi
 
-    # SSH key transfer for AUTH_MODE=key (same as before) ...
-    # (omitted here for brevity, but your existing v17.1 key-transfer block slots in unchanged)
+    # Clean up temporary 2222 server
+    pkill -f "dropbear.*2222" 2>/dev/null || true
+fi
 
-    # Save configuration
-    save_config "$HOSTNAME" "$TAG" "$SUBNET" "$SUBNET_ENABLE" "$EXIT_NODE_ENABLE" "$AUTH_MODE"
+###############################################
+# Persistence (custom.sh)
+###############################################
+log "$BLUE" "Setting persistence..."
+progress_indicator 3 "Saving state"
 
-    log "$BLUE" "Setting persistence..."
-    progress_indicator 3 "Creating custom.sh"
-
-    cat > "$CUSTOM_SH" <<EOFCUSTOM
+cat > /userdata/system/custom.sh <<EOF
 #!/bin/sh
-# Batocera Tailscale Persistence (generated by v17.2)
+# Batocera Tailscale & SSH persistence
 
 mkdir -p /dev/net
 [ ! -c /dev/net/tun ] && mknod /dev/net/tun c 10 200 && chmod 600 /dev/net/tun
 
-ip link set wlan0 up 2>/dev/null || true
+ip link set wlan0 up 2>/dev/null
 
-iptables -F INPUT 2>/dev/null || true
-iptables -P INPUT ACCEPT 2>/dev/null || true
-iptables -A INPUT -p tcp --dport 22 -j ACCEPT 2>/dev/null || true
-iptables -A INPUT -p tcp --dport 445 -j ACCEPT 2>/dev/null || true
-iptables -A INPUT -p udp --dport 137:139 -j ACCEPT 2>/dev/null || true
+iptables -F INPUT 2>/dev/null
+iptables -P INPUT ACCEPT 2>/dev/null
+iptables -A INPUT -p tcp --dport 22 -j ACCEPT 2>/dev/null
+iptables -A INPUT -p tcp --dport 445 -j ACCEPT 2>/dev/null
+iptables -A INPUT -p udp --dport 137:139 -j ACCEPT 2>/dev/null
 
 if ! pgrep -f "dropbear.*-p 22" > /dev/null 2>&1; then
     pkill -f dropbear 2>/dev/null || true
     sleep 1
+    # -s here will enforce key-only if PasswordAuth no is set
     /usr/sbin/dropbear -s -p 22 2>/dev/null || echo "Dropbear failed" >> /tmp/custom.log
 fi
 
 mkdir -p /var/run/tailscale
-ln -sf $SOCK_FILE /var/run/tailscale/tailscaled.sock 2>/dev/null || true
+ln -sf $INSTALL_DIR/tailscaled.sock /var/run/tailscale/tailscaled.sock 2>/dev/null || true
 
-if ! pgrep -f "$BIN_DIR/tailscaled" > /dev/null 2>&1; then
-    $BIN_DIR/tailscaled \\
-        --state=$STATE_FILE \\
-        --socket=$SOCK_FILE \\
+if ! pgrep -f "$INSTALL_DIR/bin/tailscaled" > /dev/null 2>&1; then
+    $INSTALL_DIR/bin/tailscaled \\
+        --state=$INSTALL_DIR/tailscaled.state \\
+        --socket=$INSTALL_DIR/tailscaled.sock \\
         --tun=userspace-networking \\
         --verbose=1 > /tmp/tailscaled.log 2>&1 &
 
     sleep 10
 
-    if [ -f "$STATE_FILE" ]; then
-        TAILSCALE_ARGS="--hostname=$HOSTNAME --accept-routes"
-        [ -n "$TAG" ] && TAILSCALE_ARGS="\$TAILSCALE_ARGS --advertise-tags=$TAG"
-        [ "$SUBNET_ENABLE" = "yes" ] && TAILSCALE_ARGS="\$TAILSCALE_ARGS --advertise-routes=$SUBNET"
-        [ "$EXIT_NODE_ENABLE" = "yes" ] && TAILSCALE_ARGS="\$TAILSCALE_ARGS --advertise-exit-node"
-        $BIN_DIR/tailscale --socket=$SOCK_FILE up \$TAILSCALE_ARGS > /tmp/tailscaled.log 2>&1 || true
+    if [ -f "$INSTALL_DIR/tailscaled.state" ]; then
+        TAILSCALE_ARGS="$PERSIST_TAILSCALE_ARGS"
+        $INSTALL_DIR/bin/tailscale --socket=$INSTALL_DIR/tailscaled.sock up \$TAILSCALE_ARGS > /tmp/tailscaled.log 2>&1
     fi
 fi
 
 sleep 15
-if [ -f /etc/samba/smb.conf ] && ! pgrep -f smbd > /dev/null 2>&1; then
+if ! pgrep -f "smbd" > /dev/null 2>&1; then
     smbd -D -s /etc/samba/smb.conf 2>/dev/null || echo "Samba failed" >> /tmp/custom.log
 fi
-EOFCUSTOM
+EOF
 
-    chmod +x "$CUSTOM_SH"
-    [ -f "$CUSTOM_SH" ] || { error_box "custom.sh creation failed."; exit 1; }
+chmod +x /userdata/system/custom.sh
+[ -f /userdata/system/custom.sh ] || { log "$RED" "ERROR: custom.sh failed to create."; exit 1; }
 
-    log "$BLUE" "Saving overlay..."
-    batocera-save-overlay && success_box "Overlay saved." || { error_box "Overlay save failed."; exit 1; }
+log "$BLUE" "Saving overlay..."
+batocera-save-overlay && log "$GREEN" "✅ Overlay saved." || { log "$RED" "Overlay save failed."; exit 1; }
 
-    banner "Setup Complete!"
-    echo ""
-    echo -e "${CYAN}Tailscale Version: $TAILSCALE_VERSION${NC}"
-    echo -e "${CYAN}Tailscale IP: $TAILSCALE_IP${NC}"
-    echo -e "${CYAN}Local IP: $LOCAL_IP${NC}"
-    echo -e "${CYAN}SSH Authentication Mode: $AUTH_MODE${NC}"
-    if [[ "$AUTH_MODE" == "key" ]]; then
-        echo -e "${CYAN}SSH Key: id_ed25519_${HOSTNAME}${NC}"
-    fi
-    if [[ -n "$TAG" ]]; then
-        echo -e "${CYAN}Tag: $TAG${NC}"
-    else
-        echo -e "${CYAN}Tag: (none)${NC}"
-    fi
-    [[ "$SUBNET_ENABLE" == "yes" ]] && echo -e "${CYAN}Subnet Routing: $SUBNET${NC}"
-    [[ "$EXIT_NODE_ENABLE" == "yes" ]] && echo -e "${CYAN}Exit Node: Enabled${NC}"
-    echo ""
+###############################################
+# Final Summary & Reboot
+###############################################
+log "$YELLOW" "Setup complete! Review settings before reboot:"
+echo -e "${CYAN}Tailscale Version: $TAILSCALE_VERSION${NC}"
+echo -e "${CYAN}Tailscale IP (or fallback): $TAILSCALE_IP${NC}"
+echo -e "${CYAN}Local IP: $LOCAL_IP${NC}"
+echo -e "${CYAN}SSH Authentication Mode: $AUTH_MODE${NC}"
 
-    read -rp "Ready to reboot? (yes/no): " REBOOT_CONFIRM
-    if [[ "$REBOOT_CONFIRM" != "yes" ]]; then
-        warn_box "Reboot canceled—review settings manually."
-        exit 0
-    fi
+if [ -n "$TAG" ]; then
+    echo -e "${CYAN}Tag: $TAG${NC}"
+else
+    echo -e "${CYAN}Tag: (none)${NC}"
+fi
 
-    log "$GREEN" "Rebooting in 5..."
-    sleep 5
-    sync
-    reboot -f || reboot
-}
+if [[ "$AUTH_MODE" == "key" ]]; then
+    echo -e "${CYAN}SSH Key filename (client): id_ed25519_${HOSTNAME}${NC}"
+fi
+[[ "$SUBNET_ENABLE" == "yes" ]] && echo -e "${CYAN}Subnet Routing: $SUBNET${NC}"
+[[ "$EXIT_NODE_ENABLE" == "yes" ]] && echo -e "${CYAN}Exit Node: Enabled${NC}"
 
-########################################
-# Uninstall
-########################################
-uninstall_tailscale() {
-    clear
-    banner "Uninstall Tailscale (v17.2)"
+read -rp "Ready to reboot now? (yes/no): " REBOOT_CONFIRM
+if [[ "$REBOOT_CONFIRM" != "yes" ]]; then
+    log "$RED" "Reboot canceled—review settings manually."
+    exit 0
+fi
 
-    warn_box "This will remove Tailscale and all associated configuration"
-    warn_box "Your SSH keys and Samba config will also be removed"
-    echo ""
-    read -rp "Are you sure you want to continue? (yes/no): " confirm
+banner "Setup Complete!"
+log "$GREEN" "✅ Tailscale & SSH configured!"
 
-    if [ "${confirm:-no}" != "yes" ]; then
-        info_box "Uninstall cancelled"
-        return 0
-    fi
+if [[ "$AUTH_MODE" == "key" ]]; then
+    log "$YELLOW" "SSH (after reboot): ssh ${HOSTNAME}-tailscale"
+    log "$CYAN" "   Or: ssh -i ~/.ssh/id_ed25519_${HOSTNAME} root@$TAILSCALE_IP"
+else
+    log "$YELLOW" "SSH (after reboot): ssh root@$TAILSCALE_IP"
+    log "$CYAN" "   Password: linux"
+fi
 
-    if [ -f "$BIN_DIR/tailscale" ]; then
-        create_backup
-        info_box "Final backup created before uninstall"
-    fi
+log "$YELLOW" "Samba access (read/write):"
+log "$CYAN" "   Local: smb://$LOCAL_IP/share"
+log "$CYAN" "   Tailscale: smb://$TAILSCALE_IP/share"
 
-    log "$BLUE" "Stopping services..."
-    pkill -f "$BIN_DIR/tailscaled" 2>/dev/null || true
-    pkill -f smbd 2>/dev/null || true
+[[ "$SUBNET_ENABLE" == "yes" ]] && log "$YELLOW" "Subnet routing enabled: Approve $SUBNET in Tailscale Admin."
+[[ "$EXIT_NODE_ENABLE" == "yes" ]] && log "$YELLOW" "Exit node enabled: Approve in Tailscale Admin."
 
-    log "$BLUE" "Removing files..."
-    rm -rf "$INSTALL_DIR"
-    rm -f "$CUSTOM_SH"
-    rm -rf /etc/samba
-    rm -f /etc/dropbear/dropbear.conf
-    rm -f /etc/dropbear/authorized_keys
-
-    log "$BLUE" "Cleaning firewall rules..."
-    iptables -F INPUT 2>/dev/null || true
-    iptables -P INPUT ACCEPT 2>/dev/null || true
-
-    success_box "Tailscale uninstalled successfully"
-    info_box "Backups are preserved in: $BACKUP_DIR"
-
-    echo ""
-    read -rp "Reboot now? (yes/no): " rb
-    if [ "${rb:-yes}" = "yes" ]; then
-        reboot -f 2>/dev/null || reboot
-    fi
-}
-
-########################################
-# Menu
-########################################
-show_menu() {
-    while true; do
-        clear
-        banner "Batocera Tailscale Manager (v17.2)"
-
-        echo -e "${WHITE}Choose an action:${NC}\n"
-        echo -e "  ${CYAN}1)${NC} Install/Repair Tailscale (full interactive setup)"
-        echo -e "  ${CYAN}2)${NC} Update Tailscale to latest version"
-        echo -e "  ${CYAN}3)${NC} Show status and diagnostics"
-        echo -e "  ${CYAN}4)${NC} Restart Tailscale service"
-        echo -e "  ${CYAN}5)${NC} Restore from backup"
-        echo -e "  ${CYAN}6)${NC} Uninstall Tailscale"
-        echo -e "  ${CYAN}7)${NC} Exit"
-        echo ""
-
-        read -rp "Enter choice [1-7]: " choice
-        case "$choice" in
-            1) install_or_repair; press_any_key ;;
-            2) update_tailscale;  press_any_key ;;
-            3) show_status;       press_any_key ;;
-            4) restart_tailscaled;press_any_key ;;
-            5)
-                if [ -f "$INSTALL_DIR/.last_backup" ]; then
-                    restore_backup
-                else
-                    error_box "No backup available"
-                fi
-                press_any_key
-                ;;
-            6) uninstall_tailscale; press_any_key ;;
-            7)
-                echo ""
-                success_box "Goodbye!"
-                exit 0
-                ;;
-            *)
-                error_box "Invalid choice"
-                sleep 1
-                ;;
-        esac
-    done
-}
-
-########################################
-# Main
-########################################
-need_root
-init_logging
-
-case "${1:-}" in
-    --update|update)
-        clear
-        banner "Batocera Tailscale Manager (v17.2)"
-        update_tailscale
-        exit $?
-        ;;
-    --status|status)
-        show_status
-        exit $?
-        ;;
-    --install|install|--repair|repair)
-        install_or_repair
-        exit $?
-        ;;
-    --uninstall|uninstall)
-        uninstall_tailscale
-        exit $?
-        ;;
-    --restart|restart)
-        clear
-        banner "Batocera Tailscale Manager (v17.2)"
-        restart_tailscaled
-        exit $?
-        ;;
-    --menu|menu|"")
-        show_menu
-        exit $?
-        ;;
-    --help|help|-h)
-        clear
-        banner "Batocera Tailscale Manager (v17.2)"
-        echo ""
-        echo "Usage: $0 [command]"
-        echo ""
-        echo "Commands:"
-        echo "  --install, install     Install or repair Tailscale"
-        echo "  --update, update       Update to latest Tailscale version"
-        echo "  --status, status       Show status and diagnostics"
-        echo "  --restart, restart     Restart Tailscale service"
-        echo "  --uninstall, uninstall Remove Tailscale completely"
-        echo "  --menu, menu           Show interactive menu (default)"
-        echo "  --help, -h             Show this help message"
-        echo ""
-        exit 0
-        ;;
-    *)
-        error_box "Unknown command: $1"
-        echo "Use --help for usage information"
-        exit 1
-        ;;
-esac
+log "$GREEN" "Rebooting in 5 seconds..."
+sleep 5
+sync
+pkill -f "dropbear.*2222" 2>/dev/null || true
+reboot -f || reboot
