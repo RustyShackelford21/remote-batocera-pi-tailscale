@@ -339,4 +339,166 @@ TAILSCALE_ARGS="--authkey=$AUTH_KEY --hostname=$HOSTNAME --accept-routes"
 
 log "$BLUE" "Bringing up Tailscale..."
 $BIN_DIR/tailscale --socket="$SOCK_FILE" up $TAILSCALE_ARGS > /tmp/tailscaled.log 2>&1 || {
-    log "$RED" "Tailscale
+    log "$RED" "Tailscale failed:"; cat /tmp/tailscaled.log; exit 1; }
+
+sleep 5
+
+log "$BLUE" "Waiting for Tailscale IP..."
+TRIES=0
+TAILSCALE_IP=""
+while [[ -z "$TAILSCALE_IP" && $TRIES -lt 10 ]]; do
+    sleep 3
+    TAILSCALE_IP=$("$BIN_DIR/tailscale" --socket="$SOCK_FILE" ip -4 2>/dev/null || true)
+    ((TRIES++))
+done
+
+if [[ -z "$TAILSCALE_IP" ]]; then
+    log "$YELLOW" "⚠️ No Tailscale IP yet; using local IP in messages."
+    TAILSCALE_IP="$LOCAL_IP"
+else
+    log "$GREEN" "✅ Tailscale IP: $TAILSCALE_IP"
+fi
+
+########################################
+# Key download & test (key mode)
+########################################
+if [[ "$AUTH_MODE" == "key" ]]; then
+    banner "SSH Key Download & Test"
+
+    log "$BLUE" "Starting temporary Dropbear on port 2222 for key download..."
+    pkill -f "dropbear.*2222" || true
+    /usr/sbin/dropbear -p 2222 || { log "$RED" "Dropbear failed on 2222."; exit 1; }
+    sleep 3
+
+    echo -e "${CYAN}From your PC, run these commands (PowerShell example):${NC}"
+    echo ""
+    echo "1) Copy the private key:"
+    echo "   scp -P 2222 root@$LOCAL_IP:$OPENSSH_KEY \"C:\\Users\\\$env:USERNAME\\.ssh\\id_ed25519_${HOSTNAME}\""
+    echo ""
+    echo "2) (Optional but recommended on Windows) tighten permissions:"
+    echo "   icacls \"C:\\Users\\\$env:USERNAME\\.ssh\\id_ed25519_${HOSTNAME}\" /inheritance:r /grant:r \"\$env:USERNAME:(R,W)\""
+    echo ""
+    echo "3) Test SSH with the key on port 2222:"
+    echo "   ssh -i \"C:\\Users\\\$env:USERNAME\\.ssh\\id_ed25519_${HOSTNAME}\" root@$LOCAL_IP -p 2222"
+    echo ""
+    echo "On Linux/macOS:"
+    echo "   scp -P 2222 root@$LOCAL_IP:$OPENSSH_KEY ~/.ssh/id_ed25519_${HOSTNAME}"
+    echo "   chmod 600 ~/.ssh/id_ed25519_${HOSTNAME}"
+    echo "   ssh -i ~/.ssh/id_ed25519_${HOSTNAME} root@$LOCAL_IP -p 2222"
+    echo ""
+    read -rp "Did key-based SSH work on port 2222 (without password)? (yes/no): " KEY_WORKS
+
+    if [[ "$KEY_WORKS" =~ ^[Yy] ]]; then
+        log "$GREEN" "✅ Key confirmed working."
+        echo ""
+        read -rp "Do you want to DISABLE SSH password logins (key-only) after reboot? (yes/no): " LOCK_CHOICE
+        if [[ "$LOCK_CHOICE" =~ ^[Yy] ]]; then
+            echo "PasswordAuth no" > /etc/dropbear/dropbear.conf
+            log "$YELLOW" "Password logins will be disabled after next reboot (key-only)."
+        else
+            log "$YELLOW" "Leaving password logins enabled (you can use key *or* password)."
+        fi
+    else
+        log "$RED" "❌ Key did not work. Leaving password logins enabled; troubleshoot before disabling."
+    fi
+
+    pkill -f "dropbear.*2222" || true
+fi
+
+########################################
+# Persistence: custom.sh
+########################################
+log "$BLUE" "Setting persistence..."
+cat > "$CUSTOM_SH" <<EOF
+#!/bin/sh
+# Batocera Tailscale & SSH persistence (Core v18.0)
+
+INSTALL_DIR="$INSTALL_DIR"
+BIN_DIR="$BIN_DIR"
+STATE_FILE="$STATE_FILE"
+SOCK_FILE="$SOCK_FILE"
+HOSTNAME="$HOSTNAME"
+TAG="$TAG"
+SUBNET_ENABLE="$SUBNET_ENABLE"
+SUBNET="$SUBNET"
+EXIT_NODE_ENABLE="$EXIT_NODE_ENABLE"
+
+mkdir -p /dev/net
+[ ! -c /dev/net/tun ] && mknod /dev/net/tun c 10 200 && chmod 600 /dev/net/tun
+
+ip link set wlan0 up 2>/dev/null || true
+
+iptables -F INPUT 2>/dev/null || true
+iptables -P INPUT ACCEPT 2>/dev/null || true
+iptables -A INPUT -p tcp --dport 22 -j ACCEPT 2>/dev/null || true
+iptables -A INPUT -p tcp --dport 445 -j ACCEPT 2>/dev/null || true
+iptables -A INPUT -p udp --dport 137-139 -j ACCEPT 2>/dev/null || true
+
+if ! pgrep -f "dropbear.*-p 22" > /dev/null 2>&1; then
+    pkill -f dropbear 2>/dev/null || true
+    sleep 1
+    /usr/sbin/dropbear -s -p 22 2>/dev/null || echo "Dropbear failed" >> /tmp/custom.log
+fi
+
+mkdir -p /var/run/tailscale
+ln -sf "$SOCK_FILE" /var/run/tailscale/tailscaled.sock 2>/dev/null || true
+
+if ! pgrep -f "\$BIN_DIR/tailscaled" > /dev/null 2>&1; then
+    "\$BIN_DIR/tailscaled" \\
+        --state="\$STATE_FILE" \\
+        --socket="\$SOCK_FILE" \\
+        --tun=userspace-networking \\
+        --verbose=1 > /tmp/tailscaled.log 2>&1 &
+
+    sleep 10
+
+    if [ -f "\$STATE_FILE" ]; then
+        TAILSCALE_ARGS="--hostname=\$HOSTNAME --accept-routes"
+        [ -n "\$TAG" ] && TAILSCALE_ARGS="\$TAILSCALE_ARGS --advertise-tags=\$TAG"
+        [ "\$SUBNET_ENABLE" = "yes" ] && TAILSCALE_ARGS="\$TAILSCALE_ARGS --advertise-routes=\$SUBNET"
+        [ "\$EXIT_NODE_ENABLE" = "yes" ] && TAILSCALE_ARGS="\$TAILSCALE_ARGS --advertise-exit-node"
+        "\$BIN_DIR/tailscale" --socket="\$SOCK_FILE" up \$TAILSCALE_ARGS > /tmp/tailscaled.log 2>&1 || true
+    fi
+fi
+
+sleep 15
+if [ -f /etc/samba/smb.conf ] && ! pgrep -f smbd > /dev/null 2>&1; then
+    smbd -D -s /etc/samba/smb.conf 2>/dev/null || echo "Samba failed" >> /tmp/custom.log
+fi
+EOF
+
+chmod +x "$CUSTOM_SH"
+[ -f "$CUSTOM_SH" ] || { log "$RED" "ERROR: custom.sh failed."; exit 1; }
+
+log "$BLUE" "Saving overlay..."
+batocera-save-overlay && log "$GREEN" "✅ Overlay saved." || { log "$RED" "Overlay failed."; exit 1; }
+
+########################################
+# Final summary & reboot prompt
+########################################
+banner "Setup Complete!"
+echo -e "${CYAN}Tailscale Version: $TAILSCALE_VERSION${NC}"
+echo -e "${CYAN}Tailscale IP (or local if not ready): $TAILSCALE_IP${NC}"
+echo -e "${CYAN}Local IP: $LOCAL_IP${NC}"
+echo -e "${CYAN}SSH Authentication Mode: $AUTH_MODE${NC}"
+if [[ "$AUTH_MODE" == "key" ]]; then
+    echo -e "${CYAN}SSH key path on Pi: $OPENSSH_KEY${NC}"
+fi
+if [[ -n "$TAG" ]]; then
+    echo -e "${CYAN}Tag: $TAG${NC}"
+else
+    echo -e "${CYAN}Tag: (none)${NC}"
+fi
+[[ "$SUBNET_ENABLE" == "yes" ]] && echo -e "${CYAN}Subnet Routing: $SUBNET${NC}"
+[[ "$EXIT_NODE_ENABLE" == "yes" ]] && echo -e "${CYAN}Exit Node: Enabled${NC}"
+
+read -rp "Ready to reboot now? (yes/no): " REBOOT_CONFIRM
+if [[ "$REBOOT_CONFIRM" != "yes" ]]; then
+    log "$YELLOW" "Reboot canceled—review settings manually."
+    exit 0
+fi
+
+log "$GREEN" "Rebooting in 5 seconds..."
+sleep 5
+sync
+reboot -f || reboot
