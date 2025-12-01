@@ -1,14 +1,11 @@
 #!/bin/bash
-# Batocera Tailscale & SSH Setup - Core Edition (v15.0)
-# - Installs Tailscale on Batocera (Pi 5)
-# - SSH via password OR key-only
-# - Optional tag, subnet routing, and exit node
-# - Simplified key workflow so "ssh root@IP" just works
+# Batocera Tailscale & SSH Setup - Core
+# Version: 18.0 - Optional tag, key-flow with 2222 test, password-safe
 
 set -euo pipefail
 
 ########################################
-# Styling & Helpers
+# Colors & logging
 ########################################
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -47,7 +44,7 @@ progress_indicator() {
 }
 
 ########################################
-# Paths
+# Paths & defaults
 ########################################
 INSTALL_DIR="/userdata/system/tailscale"
 BIN_DIR="$INSTALL_DIR/bin"
@@ -57,22 +54,21 @@ DROPBEAR_KEY="$SSH_DIR/id_dropbear"
 STATE_FILE="$INSTALL_DIR/tailscaled.state"
 SOCK_FILE="$INSTALL_DIR/tailscaled.sock"
 CUSTOM_SH="/userdata/system/custom.sh"
-
+LOCAL_SSH_PORT="22"
 DEFAULT_TAG="tag:ssh-batocera"
 
 ########################################
-# Basic checks
+# Pre-flight
 ########################################
 [ "$(id -u)" -ne 0 ] && { log "$RED" "ERROR: Run as root."; exit 1; }
 
 clear
 banner "Batocera Tailscale & SSH Setup (Core)"
-
 echo -e "${CYAN}Setup Tailscale, SSH (password or key), Samba file sharing, subnet routing, and exit node.${NC}"
 
 log "$BLUE" "Checking internet connectivity..."
 if ! ping -c 3 8.8.8.8 &>/dev/null; then
-    log "$RED" "ERROR: No internet connection detected. Connect to the internet and try again."
+    log "$RED" "ERROR: No internet connection detected. Connect and try again."
     exit 1
 fi
 log "$GREEN" "Internet OK."
@@ -83,16 +79,16 @@ if ! command -v curl &>/dev/null; then
 fi
 
 ########################################
-# Detect Tailscale version
+# Latest Tailscale version
 ########################################
 log "$BLUE" "Detecting latest Tailscale stable version for arm64..."
 progress_indicator 2 "Fetching version"
 LATEST_VERSION=$(curl -s "https://pkgs.tailscale.com/stable/" \
     | grep -oP 'tailscale_\K[0-9]+\.[0-9]+\.[0-9]+(?=_arm64\.tgz)' \
-    | sort -V | tail -n 1)
+    | sort -V | tail -n 1 || true)
 
-if [[ -z "$LATEST_VERSION" ]]; then
-    log "$YELLOW" "WARNING: Could not fetch latest version—falling back to 1.80.2."
+if [[ -z "${LATEST_VERSION:-}" ]]; then
+    log "$RED" "Could not fetch latest Tailscale version—falling back to 1.80.2."
     TAILSCALE_VERSION="1.80.2"
 else
     TAILSCALE_VERSION="$LATEST_VERSION"
@@ -100,10 +96,9 @@ else
 fi
 
 ########################################
-# Step 1: Tailscale auth key + hostname + tag
+# Step 1: Tailscale auth
 ########################################
 log "$YELLOW" "Step 1: Tailscale Setup"
-
 read -rp "Enter your Tailscale auth key (tskey-auth-...): " AUTH_KEY
 [[ -z "$AUTH_KEY" ]] && { log "$RED" "ERROR: Auth key required."; exit 1; }
 [[ ! "$AUTH_KEY" =~ ^tskey-auth- ]] && { log "$RED" "ERROR: Invalid auth key format."; exit 1; }
@@ -112,7 +107,7 @@ DEFAULT_HOSTNAME=$(hostname | cut -d'.' -f1)
 read -rp "Enter hostname (default: $DEFAULT_HOSTNAME): " USER_HOSTNAME
 HOSTNAME="${USER_HOSTNAME:-$DEFAULT_HOSTNAME}"
 
-# Tag selection: optional
+# Tag selection (optional)
 echo ""
 echo "Tag this device in Tailscale?"
 echo "1) Use default tag '$DEFAULT_TAG'"
@@ -122,14 +117,14 @@ read -rp "Select (1/2/3): " TAG_CHOICE
 
 TAG=""
 case "$TAG_CHOICE" in
-    1)
+    1|"")
         TAG="$DEFAULT_TAG"
         ;;
     3)
         read -rp "Enter custom tag (e.g., tag:batocera): " TAG
         [[ -z "$TAG" ]] && { log "$RED" "ERROR: Tag required."; exit 1; }
         ;;
-    2|"")
+    2)
         TAG=""
         ;;
     *)
@@ -137,13 +132,14 @@ case "$TAG_CHOICE" in
         ;;
 esac
 
+OPENSSH_KEY="$KEYS_DIR/id_ed25519_${HOSTNAME}"
+
 ########################################
 # Step 2: SSH auth mode
 ########################################
 log "$YELLOW" "Step 2: SSH Authentication"
-
 if [ -f "$DROPBEAR_KEY" ]; then
-    log "$GREEN" "✅ Existing SSH key detected—key authentication available."
+    log "$GREEN" "✅ SSH key detected—key authentication recommended."
 else
     log "$YELLOW" "No SSH key detected—will generate one if you choose key auth."
 fi
@@ -152,12 +148,7 @@ echo "Choose your SSH authentication method:"
 echo "1) Password (root/linux)  [easiest]"
 echo "2) Key-based authentication (more secure; recommended)"
 read -rp "Select (1/2): " SSH_CHOICE
-
-if [[ "$SSH_CHOICE" == "2" ]]; then
-    AUTH_MODE="key"
-else
-    AUTH_MODE="password"
-fi
+[[ "$SSH_CHOICE" == "2" ]] && AUTH_MODE="key" || AUTH_MODE="password"
 
 ########################################
 # Step 3: Subnet routing
@@ -170,10 +161,12 @@ read -rp "Select (1/2): " SUBNET_CHOICE
 
 SUBNET_ENABLE="no"
 SUBNET=""
+
 if [[ "$SUBNET_CHOICE" == "1" ]]; then
     log "$BLUE" "Detecting network subnet..."
     progress_indicator 1 "Scanning network"
-    GATEWAY_IP=$(ip route show default | awk '/default/ {print $3}')
+
+    GATEWAY_IP=$(ip route show default 2>/dev/null | awk '/default/ {print $3; exit}')
     if [[ -n "$GATEWAY_IP" ]]; then
         SUBNET=$(echo "$GATEWAY_IP" | awk -F. '{print $1"."$2"."$3".0/24"}')
         log "$GREEN" "✅ Detected subnet: $SUBNET"
@@ -183,9 +176,10 @@ if [[ "$SUBNET_CHOICE" == "1" ]]; then
             read -rp "Enter your subnet (e.g., 192.168.50.0/24): " SUBNET
         fi
     else
-        log "$YELLOW" "WARNING: Could not detect subnet automatically."
+        log "$YELLOW" "WARNING: Could not detect subnet."
         read -rp "Enter your subnet (e.g., 192.168.50.0/24): " SUBNET
     fi
+
     if [[ ! "$SUBNET" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}/[0-9]{1,2}$ ]]; then
         log "$RED" "Invalid subnet format."
         exit 1
@@ -201,7 +195,6 @@ echo "Configure this device as a Tailscale exit node? (others can route internet
 echo "1) Yes"
 echo "2) No (default)"
 read -rp "Select (1/2): " EXIT_NODE_CHOICE
-
 if [[ "$EXIT_NODE_CHOICE" == "1" ]]; then
     EXIT_NODE_ENABLE="yes"
     log "$GREEN" "✅ Exit node will be enabled."
@@ -211,18 +204,20 @@ else
 fi
 
 ########################################
-# Local IP detection
+# Detect local IP
 ########################################
 log "$BLUE" "Detecting local IP..."
-LOCAL_IP=$(ip -4 addr show | grep -oE "inet [0-9]+\.[0-9]+\.[0-9]+\.[0-9]+" | awk '{print $2}' | grep -v "127.0.0.1" | head -n 1)
+LOCAL_IP=$(ip -4 addr show | grep -oE "inet [0-9]+\.[0-9]+\.[0-9]+\.[0-9]+" \
+    | awk '{print $2}' | grep -v "127.0.0.1" | head -n 1)
+
 if [[ -z "$LOCAL_IP" || ! "$LOCAL_IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-    log "$YELLOW" "⚠️ Could not detect valid local IP, trying hostname -I..."
-    LOCAL_IP=$(hostname -I | awk '{print $1}')
+    log "$YELLOW" "⚠️ Could not detect valid local IP, attempting alternate methods..."
+    LOCAL_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
     if [[ -z "$LOCAL_IP" || ! "$LOCAL_IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
         log "$RED" "ERROR: Could not detect valid local IP."
-        read -rp "Enter this device's local IP: " LOCAL_IP
+        read -rp "Please enter your device's local IP address: " LOCAL_IP
         if [[ -z "$LOCAL_IP" || ! "$LOCAL_IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            log "$RED" "Invalid IP format. Exiting."
+            log "$RED" "ERROR: Invalid IP format. Exiting."
             exit 1
         fi
     fi
@@ -230,10 +225,8 @@ fi
 log "$GREEN" "✅ Local IP: $LOCAL_IP"
 
 ########################################
-# SSH key setup (server side)
+# SSH key setup (key mode)
 ########################################
-OPENSSH_KEY="$KEYS_DIR/id_ed25519"
-
 if [[ "$AUTH_MODE" == "key" ]]; then
     log "$BLUE" "Configuring SSH key authentication..."
     mkdir -p "$SSH_DIR" "$KEYS_DIR" /etc/dropbear
@@ -242,43 +235,39 @@ if [[ "$AUTH_MODE" == "key" ]]; then
     if [ ! -f "$DROPBEAR_KEY" ]; then
         log "$GREEN" "🔑 Generating Dropbear key..."
         progress_indicator 3 "Forging key"
-        dropbearkey -t ed25519 -f "$DROPBEAR_KEY" || { log "$RED" "Key generation failed."; exit 1; }
+        dropbearkey -t ed25519 -f "$DROPBEAR_KEY" || { log "$RED" "Key gen failed."; exit 1; }
         chmod 600 "$DROPBEAR_KEY"
+        dropbearkey -y -f "$DROPBEAR_KEY" | grep "^ssh-ed25519" > /etc/dropbear/authorized_keys || {
+            log "$RED" "Pubkey write failed."; exit 1; }
+        chmod 600 /etc/dropbear/authorized_keys
     fi
 
-    # Export public key to authorized_keys
-    dropbearkey -y -f "$DROPBEAR_KEY" | grep "^ssh-ed25519" > /etc/dropbear/authorized_keys || {
-        log "$RED" "Failed to extract public key."
-        exit 1
-    }
-    chmod 600 /etc/dropbear/authorized_keys
-
-    # Convert to OpenSSH key and store as id_ed25519 (DEFAULT NAME)
+    mkdir -p "$KEYS_DIR"
     dropbearconvert dropbear openssh "$DROPBEAR_KEY" "$OPENSSH_KEY" || {
-        log "$RED" "Key conversion to OpenSSH failed."
-        exit 1
-    }
+        log "$RED" "Key conversion failed."; exit 1; }
     chmod 600 "$OPENSSH_KEY"
+
+    log "$GREEN" "✅ Private key for you: $OPENSSH_KEY"
 fi
 
 ########################################
-# Dropbear configuration
+# Dropbear config
 ########################################
 log "$BLUE" "Configuring Dropbear..."
 mkdir -p /etc/dropbear
 touch /etc/dropbear/dropbear.conf
 if [[ ! -w /etc/dropbear/dropbear.conf ]]; then
-    log "$RED" "ERROR: Cannot write /etc/dropbear/dropbear.conf."
+    log "$RED" "ERROR: Cannot write Dropbear config."
     exit 1
 fi
 
-# For now, allow password so we can copy keys / test.
+# Always allow password during setup; optional lock-down later
 sed -i '/^PasswordAuth/d' /etc/dropbear/dropbear.conf 2>/dev/null || true
 echo "PasswordAuth yes" > /etc/dropbear/dropbear.conf
-log "$GREEN" "Dropbear password auth is enabled for setup."
+log "$YELLOW" "Dropbear password auth is enabled for now (root/linux)."
 
 ########################################
-# Samba configuration
+# Samba config
 ########################################
 log "$BLUE" "Configuring Samba for file sharing..."
 mkdir -p /etc/samba
@@ -310,21 +299,24 @@ else
 fi
 
 ########################################
-# Tailscale install & bring-up
+# Install Tailscale
 ########################################
 log "$BLUE" "Installing Tailscale $TAILSCALE_VERSION..."
 progress_indicator 5 "Downloading Tailscale"
 
 mkdir -p "$BIN_DIR"
-wget -q -O "$INSTALL_DIR/tailscale.tgz" "https://pkgs.tailscale.com/stable/tailscale_${TAILSCALE_VERSION}_arm64.tgz" \
+wget -q -O "$INSTALL_DIR/tailscale.tgz" \
+    "https://pkgs.tailscale.com/stable/tailscale_${TAILSCALE_VERSION}_arm64.tgz" \
     || { log "$RED" "Download failed."; exit 1; }
 
-tar -xzf "$INSTALL_DIR/tailscale.tgz" -C "$BIN_DIR" --strip-components=1 \
-    || { log "$RED" "Extraction failed."; exit 1; }
-
+tar -xzf "$INSTALL_DIR/tailscale.tgz" -C "$BIN_DIR" --strip-components=1 || {
+    log "$RED" "Extraction failed."; exit 1; }
 rm "$INSTALL_DIR/tailscale.tgz"
 chmod +x "$BIN_DIR/tailscale" "$BIN_DIR/tailscaled"
 
+########################################
+# Start tailscaled & tailscale up
+########################################
 log "$BLUE" "Starting Tailscale daemon..."
 progress_indicator 3 "Starting tailscaled"
 
@@ -346,178 +338,5 @@ TAILSCALE_ARGS="--authkey=$AUTH_KEY --hostname=$HOSTNAME --accept-routes"
 [[ "$EXIT_NODE_ENABLE" == "yes" ]] && TAILSCALE_ARGS="$TAILSCALE_ARGS --advertise-exit-node"
 
 log "$BLUE" "Bringing up Tailscale..."
-if ! $BIN_DIR/tailscale --socket="$SOCK_FILE" up $TAILSCALE_ARGS > /tmp/tailscaled.log 2>&1; then
-    log "$RED" "Tailscale failed:"
-    cat /tmp/tailscaled.log
-    exit 1
-fi
-
-sleep 5
-
-if ! $BIN_DIR/tailscale --socket="$SOCK_FILE" status &>/dev/null; then
-    log "$RED" "ERROR: Tailscale is not running. Check /tmp/tailscaled.log."
-    exit 1
-fi
-
-log "$BLUE" "Waiting for Tailscale IP..."
-TRIES=0
-TAILSCALE_IP=""
-while [[ -z "$TAILSCALE_IP" && $TRIES -lt 10 ]]; do
-    sleep 3
-    TAILSCALE_IP=$($BIN_DIR/tailscale --socket="$SOCK_FILE" ip -4 2>/dev/null || true)
-    ((TRIES++))
-done
-
-if [[ -z "$TAILSCALE_IP" ]]; then
-    log "$YELLOW" "⚠️ No Tailscale IP detected, will use local IP for SSH hints."
-    TAILSCALE_IP="$LOCAL_IP"
-else
-    log "$GREEN" "✅ Tailscale IP: $TAILSCALE_IP"
-fi
-
-########################################
-# Key download + testing (client side)
-########################################
-if [[ "$AUTH_MODE" == "key" ]]; then
-    banner "SSH Key Download & Test (Simple Mode)"
-    log "$BLUE" "Starting temporary SSH on port 2222 for key download..."
-    pkill -f "dropbear.*2222" || true
-    /usr/sbin/dropbear -p 2222 || { log "$RED" "Dropbear failed on port 2222."; exit 1; }
-    sleep 3
-
-    echo -e "${CYAN}On your computer, run ONE of these:${NC}"
-    echo ""
-    echo -e "${YELLOW}Windows PowerShell:${NC}"
-    echo "scp -P 2222 root@$LOCAL_IP:/userdata/system/tailscale/keys/id_ed25519 \"C:\\Users\\\$env:USERNAME\\.ssh\\id_ed25519\""
-    echo ""
-    echo -e "${YELLOW}Linux/macOS terminal:${NC}"
-    echo "scp -P 2222 root@$LOCAL_IP:/userdata/system/tailscale/keys/id_ed25519 ~/.ssh/id_ed25519"
-    echo ""
-    echo -e "${CYAN}Password (for this copy step):${NC} linux"
-    echo ""
-    echo -e "${CYAN}After copying the key, test SSH (still on port 2222):${NC}"
-    echo "ssh root@$LOCAL_IP -p 2222"
-    echo ""
-    echo -e "${CYAN}If the key is in the default place (id_ed25519), it should log in with NO PASSWORD PROMPT.${NC}"
-    echo ""
-
-    read -rp "Did 'ssh root@$LOCAL_IP -p 2222' work WITHOUT a password? (yes/no): " KEY_WORKS
-    if [[ ! "$KEY_WORKS" =~ ^[Yy]es$ ]]; then
-        log "$RED" "❌ Key-based SSH not confirmed. Aborting lock-down. (Password SSH will remain enabled.)"
-        pkill -f "dropbear.*2222" || true
-        AUTH_MODE="password"
-    else
-        log "$GREEN" "✅ Key confirmed. Locking SSH to key-only on port 22..."
-        pkill -f "dropbear.*2222" || true
-
-        # Disable password auth now
-        sed -i '/^PasswordAuth/d' /etc/dropbear/dropbear.conf 2>/dev/null || true
-        echo "PasswordAuth no" > /etc/dropbear/dropbear.conf
-
-        pkill -f "dropbear.*-p 22" || true
-        sleep 1
-        /usr/sbin/dropbear -s -p 22 || { log "$RED" "Dropbear failed on 22."; exit 1; }
-        log "$GREEN" "SSH is now KEY-ONLY on port 22."
-    fi
-fi
-
-########################################
-# Persistence (custom.sh)
-########################################
-log "$BLUE" "Setting persistence (custom.sh)..."
-cat > "$CUSTOM_SH" <<EOF
-#!/bin/sh
-# Batocera Tailscale & SSH Persistence (Core v15.0)
-
-mkdir -p /dev/net
-[ ! -c /dev/net/tun ] && mknod /dev/net/tun c 10 200 && chmod 600 /dev/net/tun
-
-# Make sure Wi-Fi is up (if applicable)
-ip link set wlan0 up 2>/dev/null || true
-
-# Basic firewall: allow SSH and Samba
-iptables -F INPUT 2>/dev/null || true
-iptables -P INPUT ACCEPT 2>/dev/null || true
-iptables -A INPUT -p tcp --dport 22 -j ACCEPT 2>/dev/null || true
-iptables -A INPUT -p tcp --dport 445 -j ACCEPT 2>/dev/null || true
-iptables -A INPUT -p udp --dport 137:139 -j ACCEPT 2>/dev/null || true
-
-# Ensure Dropbear is running on 22
-if ! pgrep -f "dropbear.*-p 22" > /dev/null 2>&1; then
-    pkill -f dropbear 2>/dev/null || true
-    sleep 1
-    /usr/sbin/dropbear -s -p 22 2>/dev/null || echo "Dropbear failed" >> /tmp/custom.log
-fi
-
-# Tailscale daemon
-mkdir -p /var/run/tailscale
-ln -sf $SOCK_FILE /var/run/tailscale/tailscaled.sock 2>/dev/null || true
-
-if ! pgrep -f "$BIN_DIR/tailscaled" > /dev/null 2>&1; then
-    $BIN_DIR/tailscaled \\
-        --state=$STATE_FILE \\
-        --socket=$SOCK_FILE \\
-        --tun=userspace-networking \\
-        --verbose=1 > /tmp/tailscaled.log 2>&1 &
-
-    sleep 10
-
-    TAILSCALE_ARGS="--hostname=$HOSTNAME --accept-routes"
-    [ -n "$TAG" ] && TAILSCALE_ARGS="\$TAILSCALE_ARGS --advertise-tags=$TAG"
-    [ "$SUBNET_ENABLE" = "yes" ] && TAILSCALE_ARGS="\$TAILSCALE_ARGS --advertise-routes=$SUBNET"
-    [ "$EXIT_NODE_ENABLE" = "yes" ] && TAILSCALE_ARGS="\$TAILSCALE_ARGS --advertise-exit-node"
-
-    if [ -f "$STATE_FILE" ]; then
-        $BIN_DIR/tailscale --socket=$SOCK_FILE up \$TAILSCALE_ARGS > /tmp/tailscaled.log 2>&1 || true
-    fi
-fi
-
-# Restart Samba if needed
-sleep 15
-if [ -f /etc/samba/smb.conf ] && ! pgrep -f smbd > /dev/null 2>&1; then
-    smbd -D -s /etc/samba/smb.conf 2>/dev/null || echo "Samba failed" >> /tmp/custom.log
-fi
-EOF
-
-chmod +x "$CUSTOM_SH"
-[ -f "$CUSTOM_SH" ] || { log "$RED" "ERROR: custom.sh creation failed."; exit 1; }
-
-log "$BLUE" "Saving overlay..."
-batocera-save-overlay && log "$GREEN" "✅ Overlay saved." || { log "$RED" "Overlay save failed."; exit 1; }
-
-########################################
-# Final summary + optional reboot
-########################################
-banner "Setup Complete!"
-
-echo -e "${CYAN}Tailscale Version: ${TAILSCALE_VERSION}${NC}"
-echo -e "${CYAN}Local IP:          ${LOCAL_IP}${NC}"
-echo -e "${CYAN}Tailscale IP:      ${TAILSCALE_IP}${NC}"
-echo -e "${CYAN}SSH Mode:          ${AUTH_MODE}${NC}"
-[[ "$SUBNET_ENABLE" == "yes" ]] && echo -e "${CYAN}Subnet Routing:    ${SUBNET}${NC}"
-[[ "$EXIT_NODE_ENABLE" == "yes" ]] && echo -e "${CYAN}Exit Node:         Enabled${NC}"
-[[ -n "$TAG" ]] && echo -e "${CYAN}Tag:               ${TAG}${NC}" || echo -e "${CYAN}Tag:               (none)${NC}"
-
-if [[ "$AUTH_MODE" == "key" ]]; then
-    echo ""
-    echo -e "${YELLOW}From now on, if your key is in the default place (id_ed25519), you can connect with:${NC}"
-    echo "  ssh root@$LOCAL_IP"
-    echo "  ssh root@$TAILSCALE_IP"
-else
-    echo ""
-    echo -e "${YELLOW}Password SSH remains enabled. Connect with:${NC}"
-    echo "  ssh root@$LOCAL_IP"
-    echo "  ssh root@$TAILSCALE_IP"
-    echo -e "${CYAN}Password:${NC} linux"
-fi
-
-echo ""
-read -rp "Ready to reboot now? (yes/no): " REBOOT_CONFIRM
-if [[ "$REBOOT_CONFIRM" == "yes" ]]; then
-    log "$GREEN" "Rebooting in 5s..."
-    sleep 5
-    sync
-    reboot -f || reboot
-else
-    log "$YELLOW" "Reboot skipped. Settings will take full effect after the next reboot."
-fi
+$BIN_DIR/tailscale --socket="$SOCK_FILE" up $TAILSCALE_ARGS > /tmp/tailscaled.log 2>&1 || {
+    log "$RED" "Tailscale
