@@ -1,6 +1,6 @@
 #!/bin/bash
 # Batocera Tailscale & SSH Setup
-# Version: 19.2 - Improved error handling, streamlined flow, better UX
+# Version: 19.4 - CRITICAL FIX: Never kills user's SSH session
 
 # Use pipefail but NOT -e (we handle errors manually)
 set -uo pipefail
@@ -63,8 +63,10 @@ run_with_spinner() {
     return $result
 }
 
-safe_pkill() {
-    pkill -f "$1" 2>/dev/null || true
+# Safe pkill for port 2222 test server ONLY
+# NEVER use this for main dropbear on port 22!
+kill_test_dropbear() {
+    pkill -f "dropbear.*2222" 2>/dev/null || true
     sleep 1
 }
 
@@ -113,10 +115,10 @@ OPENSSH_KEY=""
 : > "$LOG_FILE"
 
 ########################################
-# Cleanup on exit
+# Cleanup on exit - ONLY kills test server
 ########################################
 cleanup() {
-    safe_pkill "dropbear.*2222"
+    kill_test_dropbear
 }
 trap cleanup EXIT
 
@@ -328,7 +330,9 @@ install_tailscale() {
 start_tailscale() {
     banner "Starting Tailscale"
 
-    safe_pkill "tailscaled"
+    # Kill any existing tailscaled (this is safe - it's not our SSH connection)
+    pkill -f "tailscaled" 2>/dev/null || true
+    sleep 2
 
     mkdir -p /var/run/tailscale /dev/net
 
@@ -425,21 +429,27 @@ configure_dropbear() {
 
     mkdir -p /etc/dropbear
 
+    # ============================================================
+    # CRITICAL: We ONLY update the config file here.
+    # We NEVER kill, restart, or touch the running dropbear!
+    # Doing so would terminate this SSH session and lock out the user.
+    # The new config takes effect after reboot.
+    # ============================================================
+
     case "$AUTH_MODE" in
         password|both)
             echo "PasswordAuth yes" > /etc/dropbear/dropbear.conf
             log_info "Password authentication: enabled"
             ;;
         key_only)
+            # Password stays enabled until we verify the key works
             echo "PasswordAuth yes" > /etc/dropbear/dropbear.conf
-            log_info "Password temporarily enabled (will be disabled after key verification)"
+            log_info "Password temporarily enabled (will disable after key verification)"
             ;;
     esac
 
-    if ! pgrep -f "dropbear.*-p 22" >/dev/null 2>&1; then
-        safe_pkill "dropbear"
-        /usr/sbin/dropbear -p 22 2>/dev/null || log_warn "Dropbear may already be running"
-    fi
+    log_success "SSH config written (takes effect after reboot)"
+    log_info "Your current SSH session is unaffected"
 }
 
 key_download_and_test() {
@@ -449,22 +459,27 @@ key_download_and_test() {
 
     banner "SSH Key Download & Verification"
 
-    safe_pkill "dropbear.*2222"
-    /usr/sbin/dropbear -p 2222 2>/dev/null || {
+    # Kill any existing test server on 2222 (safe - not our session)
+    kill_test_dropbear
+
+    # Start a SEPARATE dropbear on port 2222 for key testing
+    # This does NOT affect the main dropbear on port 22
+    if ! /usr/sbin/dropbear -p 2222 2>/dev/null; then
         log_error "Could not start test SSH server on port 2222"
         return 1
-    }
+    fi
     sleep 2
 
-    log_success "Temporary SSH server running on port 2222"
+    log_success "Test SSH server running on port 2222"
     echo ""
     echo -e "${YELLOW}================================================================${NC}"
     echo -e "${BOLD}  IMPORTANT: Do these steps in a NEW terminal on your PC${NC}"
+    echo -e "${BOLD}  Keep THIS terminal open until you confirm the key works!${NC}"
     echo -e "${YELLOW}================================================================${NC}"
     echo ""
     echo -e "${BOLD}STEP 1: Download the private key${NC}"
     echo ""
-    echo "Open a terminal on your computer and copy-paste the command for your OS:"
+    echo "Open a NEW terminal on your computer and copy-paste the command for your OS:"
     echo ""
     echo -e "${CYAN}=== macOS / Linux ===${NC}"
     echo ""
@@ -484,7 +499,7 @@ key_download_and_test() {
     echo ""
     echo -e "${BOLD}STEP 2: Test the key (should NOT ask for password)${NC}"
     echo ""
-    echo "In the same terminal, copy-paste this command:"
+    echo "In the same NEW terminal, copy-paste this command:"
     echo ""
     echo -e "${CYAN}=== macOS / Linux ===${NC}"
     echo ""
@@ -497,12 +512,13 @@ key_download_and_test() {
         "$HOSTNAME" "$LOCAL_IP"
     echo ""
     echo -e "${GREEN}If successful, you will see: Key_auth_success${NC}"
-    echo -e "${RED}If it asks for a password, something went wrong.${NC}"
+    echo -e "${RED}If it asks for a password or fails, the key did not work.${NC}"
     echo ""
 
     read -rp "Did you see 'Key_auth_success' (no password prompt)? (y/N): " KEY_WORKS
 
-    safe_pkill "dropbear.*2222"
+    # Clean up test server
+    kill_test_dropbear
 
     if [[ "${KEY_WORKS,,}" =~ ^y ]]; then
         log_success "Key authentication verified!"
@@ -589,7 +605,7 @@ create_persistence() {
 
     cat > "$CUSTOM_SH" << 'CUSTOMEOF'
 #!/bin/sh
-# Batocera Tailscale & SSH persistence (v19.2)
+# Batocera Tailscale & SSH persistence (v19.4)
 # Auto-generated - do not edit manually
 
 INSTALL_DIR="__INSTALL_DIR__"
@@ -620,8 +636,10 @@ iptables -A INPUT -p tcp --dport 22 -j ACCEPT 2>/dev/null || true
 iptables -A INPUT -p tcp --dport 445 -j ACCEPT 2>/dev/null || true
 
 # Start Dropbear SSH
-if ! pgrep -f "dropbear.*-p 22" > /dev/null 2>&1; then
+if ! pgrep -f "dropbear" > /dev/null 2>&1; then
     /usr/sbin/dropbear -p 22 2>/dev/null && log "Dropbear started" || log "Dropbear failed"
+else
+    log "Dropbear already running"
 fi
 
 # Start Tailscale
@@ -742,7 +760,11 @@ show_summary() {
 ########################################
 main() {
     clear
-    banner "Batocera Tailscale & SSH Setup v19.2"
+    banner "Batocera Tailscale & SSH Setup v19.4"
+
+    echo -e "${YELLOW}NOTE: This script will NOT disconnect your current SSH session.${NC}"
+    echo -e "${YELLOW}You will test keys in a separate terminal before any changes take effect.${NC}"
+    echo ""
 
     preflight_checks
     get_tailscale_version
